@@ -1,0 +1,5 @@
+geopandas
+wget
+mercantile
+tqdm
+requests
