@@ -122,14 +122,14 @@ def get_coordinates_as_point(inputdict):
 def get_mapillary_token(token_file="mapillary_token"):
     """
     Discover Mapillary API token from multiple sources in priority order:
-    1. Environment variables (MAPPILLARY_API_TOKEN, MAPILLARY_TOKEN)
+    1. Environment variables (API_TOKEN, MAPPILLARY_API_TOKEN, MAPILLARY_TOKEN)
     2. Token file (default: "mapillary_token")
     
     Returns:
         str: The API token, or empty string if none found
     """
     # List of environment variables to check in priority order
-    env_vars = ["MAPPILLARY_API_TOKEN", "MAPILLARY_TOKEN"]
+    env_vars = ["API_TOKEN", "MAPPILLARY_API_TOKEN", "MAPILLARY_TOKEN"]
     
     # Check environment variables first
     for env_var in env_vars:
