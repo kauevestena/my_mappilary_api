@@ -166,3 +166,6 @@ mapillary_token
 
 # sample stuff:
 sample_images
+
+# Generated map files from examples
+*.html
