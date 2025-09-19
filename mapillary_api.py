@@ -120,11 +120,29 @@ def get_coordinates_as_point(inputdict):
 
 # from tqdm import tqdm
 def get_mapillary_token(token_file="mapillary_token"):
+    """
+    Discover Mapillary API token from multiple sources in priority order:
+    1. Environment variables (MAPPILLARY_API_TOKEN, MAPILLARY_TOKEN)
+    2. Token file (default: "mapillary_token")
+    
+    Returns:
+        str: The API token, or empty string if none found
+    """
+    # List of environment variables to check in priority order
+    env_vars = ["MAPPILLARY_API_TOKEN", "MAPILLARY_TOKEN"]
+    
+    # Check environment variables first
+    for env_var in env_vars:
+        token = os.environ.get(env_var)
+        if token:
+            return token.strip()
+    
+    # Fallback to file-based token discovery
     if not os.path.exists(token_file):
         return ""
 
     with open(token_file, "r") as f:
-        return f.readline()
+        return f.readline().strip()
 
 
 # right after the function definition
