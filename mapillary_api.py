@@ -147,13 +147,47 @@ def selected_columns_to_str(df, desired_type=list):
 
 
 def dump_json(data, path):
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+    """
+    Save data as JSON file with error handling.
+    
+    Parameters:
+        data: Data to save as JSON
+        path (str): File path where to save the JSON
+        
+    Raises:
+        IOError: If file cannot be written
+        TypeError: If data cannot be serialized to JSON
+    """
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=4)
+    except (IOError, OSError) as e:
+        raise IOError(f"Cannot write JSON file '{path}': {e}")
+    except (TypeError, ValueError) as e:
+        raise TypeError(f"Cannot serialize data to JSON: {e}")
 
 
 def read_json(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """
+    Read JSON file with error handling.
+    
+    Parameters:
+        path (str): Path to JSON file to read
+        
+    Returns:
+        Data loaded from JSON file
+        
+    Raises:
+        IOError: If file cannot be read
+        ValueError: If file contains invalid JSON
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (IOError, OSError) as e:
+        raise IOError(f"Cannot read JSON file '{path}': {e}")
+    except (json.JSONDecodeError, ValueError) as e:
+        raise ValueError(f"Invalid JSON in file '{path}': {e}")
 
 
 def get_coordinates_as_point(inputdict):
@@ -243,14 +277,14 @@ def get_mapillary_images_metadata(
     if not all(isinstance(coord, (int, float)) for coord in [minLon, minLat, maxLon, maxLat]):
         raise ValueError("All coordinate parameters must be numbers")
     
-    if minLon >= maxLon or minLat >= maxLat:
-        raise ValueError("Invalid bounding box: min coordinates must be less than max coordinates")
-    
     if not (-180 <= minLon <= 180) or not (-180 <= maxLon <= 180):
         raise ValueError("Longitude values must be between -180 and 180")
     
     if not (-90 <= minLat <= 90) or not (-90 <= maxLat <= 90):
         raise ValueError("Latitude values must be between -90 and 90")
+    
+    if minLon >= maxLon or minLat >= maxLat:
+        raise ValueError("Invalid bounding box: min coordinates must be less than max coordinates")
     
     if not isinstance(limit, int) or limit <= 0:
         raise ValueError("Limit must be a positive integer")
@@ -319,7 +353,22 @@ def get_bounding_box(lon, lat, radius):
     Returns:
         tuple: A tuple containing the minimum and maximum longitude and latitude
             of the bounding box.
+            
+    Raises:
+        ValueError: For invalid coordinate or radius values
     """
+    # Input validation
+    if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+        raise ValueError("Longitude and latitude must be numbers")
+    
+    if not (-180 <= lon <= 180):
+        raise ValueError("Longitude must be between -180 and 180")
+    
+    if not (-90 <= lat <= 90):
+        raise ValueError("Latitude must be between -90 and 90")
+    
+    if not isinstance(radius, (int, float)) or radius <= 0:
+        raise ValueError("Radius must be a positive number")
 
     # Convert radius from meters to degrees
     radius_deg = radius_to_degrees(radius, lat)
@@ -356,24 +405,50 @@ def download_mapillary_image(url, outfilepath, cooldown=1):
 
 
 def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
+    """
+    Convert Mapillary API response data to a GeoDataFrame.
+    
+    Parameters:
+        data (dict): Mapillary API response containing image metadata
+        outpath (str, optional): Path to save the GeoDataFrame
+        filtering_polygon (optional): Polygon to filter results spatially
+        
+    Returns:
+        GeoDataFrame: Processed image data with geometry
+        
+    Raises:
+        ValueError: If data format is invalid
+    """
+    if not isinstance(data, dict):
+        raise ValueError("Data must be a dictionary (Mapillary API response)")
 
     if data.get("data"):
+        try:
+            as_df = pd.DataFrame.from_records(data["data"])
+            
+            # Check if geometry column exists
+            if "geometry" not in as_df.columns:
+                raise ValueError("No 'geometry' field found in data records")
 
-        as_df = pd.DataFrame.from_records(data["data"])
+            as_df.geometry = as_df.geometry.apply(get_coordinates_as_point)
 
-        as_df.geometry = as_df.geometry.apply(get_coordinates_as_point)
+            as_gdf = gpd.GeoDataFrame(as_df, crs="EPSG:4326", geometry="geometry")
 
-        as_gdf = gpd.GeoDataFrame(as_df, crs="EPSG:4326", geometry="geometry")
+            selected_columns_to_str(as_gdf)
 
-        selected_columns_to_str(as_gdf)
+            if filtering_polygon:
+                as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)]
 
-        if filtering_polygon:
-            as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)]
+            if outpath:
+                try:
+                    as_gdf.to_file(outpath)
+                except Exception as e:
+                    print(f"⚠️  Warning: Could not save to {outpath}: {e}")
 
-        if outpath:
-            as_gdf.to_file(outpath)
-
-        return as_gdf
+            return as_gdf
+        except Exception as e:
+            print(f"⚠️  Warning: Error processing data: {e}")
+            return gpd.GeoDataFrame()
     else:
         return gpd.GeoDataFrame()
 
