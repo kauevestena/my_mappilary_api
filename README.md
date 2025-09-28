@@ -1,6 +1,6 @@
 # My Mapillary API
 
-A lightweight Python library for accessing the Mapillary API with minimal dependencies.
+A lightweight Python library for accessing the Mapillary API speaking GeoDataframes directly.
 
 ## Features
 
