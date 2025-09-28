@@ -1,6 +1,7 @@
 from math import cos, pi
 from time import sleep
-import os, json
+import os
+import json
 import requests
 import wget
 import geopandas as gpd
@@ -45,13 +46,17 @@ def download_all_pictures_from_gdf(
     gdf, outfolderpath, id_field="id", url_field="thumb_original_url"
 ):
     """
-    Downloads all the pictures from a GeoDataFrame (gdf) and saves them to the specified output folder.
+    Downloads all the pictures from a GeoDataFrame (gdf) and saves them to the
+    specified output folder.
 
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing the data.
-        outfolderpath (str): The path to the output folder where the pictures will be saved.
-        id_field (str, optional): The name of the field in the GeoDataFrame that contains the unique identifier for each picture. Default is 'id'.
-        url_field (str, optional): The name of the field in the GeoDataFrame that contains the URL of the picture. Default is 'thumb_original_url'.
+        outfolderpath (str): The path to the output folder where the pictures
+            will be saved.
+        id_field (str, optional): The name of the field in the GeoDataFrame
+            that contains the unique identifier for each picture. Default is 'id'.
+        url_field (str, optional): The name of the field in the GeoDataFrame
+            that contains the URL of the picture. Default is 'thumb_original_url'.
 
     Returns:
         None
@@ -124,19 +129,16 @@ def get_mapillary_token(token_file="mapillary_token"):
     Discover Mapillary API token from multiple sources in priority order:
     1. Environment variables (API_TOKEN, MAPPILLARY_API_TOKEN, MAPILLARY_TOKEN)
     2. Token file (default: "mapillary_token")
-    
     Returns:
         str: The API token, or empty string if none found
     """
     # List of environment variables to check in priority order
     env_vars = ["API_TOKEN", "MAPPILLARY_API_TOKEN", "MAPILLARY_TOKEN"]
-    
     # Check environment variables first
     for env_var in env_vars:
         token = os.environ.get(env_var)
         if token:
             return token.strip()
-    
     # Fallback to file-based token discovery
     if not os.path.exists(token_file):
         return ""
@@ -205,7 +207,8 @@ def degrees_to_radius(degrees, lat):
 
 def get_bounding_box(lon, lat, radius):
     """
-    Return a bounding box tuple as (minLon, minLat, maxLon, maxLat) from a pair of coordinates and a radius, using shapely.
+    Return a bounding box tuple as (minLon, minLat, maxLon, maxLat) from a pair
+    of coordinates and a radius, using shapely.
 
     Parameters:
         lon (float): The longitude of the center of the bounding box.
@@ -213,7 +216,8 @@ def get_bounding_box(lon, lat, radius):
         radius (float): The radius of the bounding box in meters.
 
     Returns:
-        tuple: A tuple containing the minimum and maximum longitude and latitude of the bounding box.
+        tuple: A tuple containing the minimum and maximum longitude and latitude
+            of the bounding box.
     """
 
     # Convert radius from meters to degrees
