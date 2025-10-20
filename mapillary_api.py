@@ -64,40 +64,42 @@ def download_all_pictures_from_gdf(
     if gdf.empty:
         print("⚠️  Warning: Empty GeoDataFrame provided - nothing to download")
         return {"success": 0, "failed": 0, "errors": []}
-    
+
     # Validate required fields exist
     if id_field not in gdf.columns:
         raise ValueError(f"ID field '{id_field}' not found in GeoDataFrame columns")
     if url_field not in gdf.columns:
         raise ValueError(f"URL field '{url_field}' not found in GeoDataFrame columns")
-    
+
     # Create output directory if it doesn't exist
     create_dir_if_not_exists(outfolderpath)
-    
+
     success_count = 0
     failed_count = 0
     errors = []
-    
+
     for row in tqdm(gdf.itertuples(), total=len(gdf), desc="Downloading images"):
         try:
             image_id = getattr(row, id_field)
             image_url = getattr(row, url_field)
-            
+
             if not image_url:
                 errors.append(f"Empty URL for image ID: {image_id}")
                 failed_count += 1
                 continue
-                
+
             download_mapillary_image(
                 image_url,
                 os.path.join(outfolderpath, str(image_id) + ".jpg"),
             )
             success_count += 1
         except Exception as e:
-            error_msg = f"Failed to download image ID {getattr(row, id_field, 'unknown')}: {e}"
+            error_msg = (
+                f"Failed to download image ID {getattr(row, id_field, 'unknown')}: {e}"
+            )
             errors.append(error_msg)
             failed_count += 1
-    
+
     print(f"✅ Download completed: {success_count} successful, {failed_count} failed")
     if errors:
         print(f"❌ Errors encountered: {len(errors)}")
@@ -105,7 +107,7 @@ def download_all_pictures_from_gdf(
             print(f"   - {error}")
         if len(errors) > 5:
             print(f"   ... and {len(errors) - 5} more errors")
-    
+
     return {"success": success_count, "failed": failed_count, "errors": errors}
 
 
@@ -149,11 +151,11 @@ def selected_columns_to_str(df, desired_type=list):
 def dump_json(data, path):
     """
     Save data as JSON file with error handling.
-    
+
     Parameters:
         data: Data to save as JSON
         path (str): File path where to save the JSON
-        
+
     Raises:
         IOError: If file cannot be written
         TypeError: If data cannot be serialized to JSON
@@ -170,13 +172,13 @@ def dump_json(data, path):
 def read_json(path):
     """
     Read JSON file with error handling.
-    
+
     Parameters:
         path (str): Path to JSON file to read
-        
+
     Returns:
         Data loaded from JSON file
-        
+
     Raises:
         IOError: If file cannot be read
         ValueError: If file contains invalid JSON
@@ -213,7 +215,7 @@ def get_mapillary_token(token_file="mapillary_token", verbose=False):
             if verbose:
                 print(f"✅ Found API token in environment variable: {env_var}")
             return token.strip()
-    
+
     # Fallback to file-based token discovery
     if os.path.exists(token_file):
         try:
@@ -226,14 +228,16 @@ def get_mapillary_token(token_file="mapillary_token", verbose=False):
         except (IOError, OSError) as e:
             if verbose:
                 print(f"⚠️  Warning: Could not read token file {token_file}: {e}")
-    
+
     if verbose:
-        print("⚠️  Warning: No API token found. Please set one of these environment variables:")
+        print(
+            "⚠️  Warning: No API token found. Please set one of these environment variables:"
+        )
         print("   - API_TOKEN")
-        print("   - MAPPILLARY_API_TOKEN") 
+        print("   - MAPPILLARY_API_TOKEN")
         print("   - MAPILLARY_TOKEN")
         print(f"   Or create a file named '{token_file}' with your token.")
-    
+
     return ""
 
 
@@ -255,6 +259,7 @@ def get_mapillary_images_metadata(
     token=MAPPILARY_TOKEN,
     outpath=None,
     limit=5000,
+    timeout=300,
 ):
     """
     Request images from Mapillary API given a bbox
@@ -268,30 +273,36 @@ def get_mapillary_images_metadata(
 
     Returns:
         dict: A dictionary containing the response from the API.
-        
+
     Raises:
         requests.exceptions.RequestException: For network-related errors
         ValueError: For invalid API responses or missing token
     """
     # Input validation
-    if not all(isinstance(coord, (int, float)) for coord in [minLon, minLat, maxLon, maxLat]):
+    if not all(
+        isinstance(coord, (int, float)) for coord in [minLon, minLat, maxLon, maxLat]
+    ):
         raise ValueError("All coordinate parameters must be numbers")
-    
+
     if not (-180 <= minLon <= 180) or not (-180 <= maxLon <= 180):
         raise ValueError("Longitude values must be between -180 and 180")
-    
+
     if not (-90 <= minLat <= 90) or not (-90 <= maxLat <= 90):
         raise ValueError("Latitude values must be between -90 and 90")
-    
+
     if minLon >= maxLon or minLat >= maxLat:
-        raise ValueError("Invalid bounding box: min coordinates must be less than max coordinates")
-    
+        raise ValueError(
+            "Invalid bounding box: min coordinates must be less than max coordinates"
+        )
+
     if not isinstance(limit, int) or limit <= 0:
         raise ValueError("Limit must be a positive integer")
-        
+
     if not token:
-        raise ValueError("No valid Mapillary API token provided. Please set API_TOKEN environment variable or create a mapillary_token file.")
-    
+        raise ValueError(
+            "No valid Mapillary API token provided. Please set API_TOKEN environment variable or create a mapillary_token file."
+        )
+
     url = "https://graph.mapillary.com/images"
     params = {
         "bbox": f"{minLon},{minLat},{maxLon},{maxLat}",
@@ -299,26 +310,30 @@ def get_mapillary_images_metadata(
         "access_token": token,
         "fields": ",".join(fields),
     }
-    
+
     try:
-        response = requests.get(url, params=params, timeout=30)
+        response = requests.get(url, params=params, timeout=timeout)
         response.raise_for_status()  # Raises HTTPError for bad status codes
     except requests.exceptions.RequestException as e:
-        raise requests.exceptions.RequestException(f"Failed to fetch data from Mapillary API: {e}")
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch data from Mapillary API: {e}"
+        )
 
     try:
         as_dict = response.json()
     except ValueError as e:
         raise ValueError(f"Invalid JSON response from Mapillary API: {e}")
-    
+
     # Check for API error responses
     if "error" in as_dict:
         error_msg = as_dict.get("error", {}).get("message", "Unknown API error")
         raise ValueError(f"Mapillary API error: {error_msg}")
-    
+
     # Warn if results might be truncated
     if as_dict.get("data") and len(as_dict["data"]) == limit:
-        print(f"⚠️  Warning: Query returned exactly {limit} results - there may be more images available. Consider using tiled querying for complete coverage.")
+        print(
+            f"⚠️  Warning: Query returned exactly {limit} results - there may be more images available. Consider using tiled querying for complete coverage."
+        )
 
     if outpath:
         dump_json(as_dict, outpath)
@@ -353,20 +368,20 @@ def get_bounding_box(lon, lat, radius):
     Returns:
         tuple: A tuple containing the minimum and maximum longitude and latitude
             of the bounding box.
-            
+
     Raises:
         ValueError: For invalid coordinate or radius values
     """
     # Input validation
     if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
         raise ValueError("Longitude and latitude must be numbers")
-    
+
     if not (-180 <= lon <= 180):
         raise ValueError("Longitude must be between -180 and 180")
-    
+
     if not (-90 <= lat <= 90):
         raise ValueError("Latitude must be between -90 and 90")
-    
+
     if not isinstance(radius, (int, float)) or radius <= 0:
         raise ValueError("Radius must be a positive number")
 
@@ -386,12 +401,12 @@ def get_bounding_box(lon, lat, radius):
 def download_mapillary_image(url, outfilepath, cooldown=1):
     """
     Download an image from a URL and save it to the specified path.
-    
+
     Parameters:
         url (str): The URL of the image to download.
         outfilepath (str): The path where the image should be saved.
         cooldown (int): Time to wait after download in seconds.
-        
+
     Raises:
         Exception: Re-raises any download errors for proper error propagation
     """
@@ -407,15 +422,15 @@ def download_mapillary_image(url, outfilepath, cooldown=1):
 def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
     """
     Convert Mapillary API response data to a GeoDataFrame.
-    
+
     Parameters:
         data (dict): Mapillary API response containing image metadata
         outpath (str, optional): Path to save the GeoDataFrame
         filtering_polygon (optional): Polygon to filter results spatially
-        
+
     Returns:
         GeoDataFrame: Processed image data with geometry
-        
+
     Raises:
         ValueError: If data format is invalid
     """
@@ -425,7 +440,7 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
     if data.get("data"):
         try:
             as_df = pd.DataFrame.from_records(data["data"])
-            
+
             # Check if geometry column exists
             if "geometry" not in as_df.columns:
                 raise ValueError("No 'geometry' field found in data records")
@@ -497,14 +512,14 @@ def resort_bbox(bbox):
 def get_territory_polygon(place_name, outpath=None):
     """
     Get polygon for a named place using OpenStreetMap Nominatim API.
-    
+
     Parameters:
         place_name (str): Name of the place to search for.
         outpath (str, optional): Path to save the polygon as JSON.
-        
+
     Returns:
         dict: GeoJSON polygon object, or None if not found.
-        
+
     Raises:
         requests.exceptions.RequestException: For network-related errors
         ValueError: For invalid responses or no results found
@@ -512,12 +527,14 @@ def get_territory_polygon(place_name, outpath=None):
     # Make a request to Nominatim API with the place name
     url = "https://nominatim.openstreetmap.org/search"
     params = {"q": place_name, "format": "json", "polygon_geojson": 1}
-    
+
     try:
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
     except requests.exceptions.RequestException as e:
-        raise requests.exceptions.RequestException(f"Failed to fetch territory data from Nominatim API: {e}")
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch territory data from Nominatim API: {e}"
+        )
 
     try:
         data = response.json()
@@ -532,7 +549,7 @@ def get_territory_polygon(place_name, outpath=None):
 
     # removing all non-polygon objects:
     polygon_data = [d for d in data if d.get("geojson", {}).get("type") == "Polygon"]
-    
+
     if not polygon_data:
         raise ValueError(f"No polygon geometry found for place name: '{place_name}'")
 
@@ -549,31 +566,31 @@ def get_territory_polygon(place_name, outpath=None):
 def filter_metadata_with_polygon(data, polygon, anti_rounding_factor=1000000):
     """
     Filter metadata by keeping only points that are contained within the polygon.
-    
+
     Parameters:
         data (dict): Mapillary API response containing image metadata.
         polygon: Shapely polygon object for filtering.
         anti_rounding_factor (int): Factor to handle coordinate precision issues.
-        
+
     Returns:
         dict: Filtered metadata dictionary.
     """
-    if not data.get('data'):
+    if not data.get("data"):
         return data
-    
+
     # Create a copy to avoid modifying the original data
     filtered_data = data.copy()
-    filtered_data['data'] = []
-    
+    filtered_data["data"] = []
+
     # Iterate through items and keep only those within the polygon
-    for item in data['data']:
+    for item in data["data"]:
         try:
-            point = Point(item['geometry']['coordinates'])
+            point = Point(item["geometry"]["coordinates"])
             if polygon.contains(point):
-                filtered_data['data'].append(item)
+                filtered_data["data"].append(item)
         except (KeyError, TypeError, ValueError) as e:
             # Skip malformed entries but continue processing
             print(f"⚠️  Warning: Skipping malformed geometry in item: {e}")
             continue
-    
+
     return filtered_data
