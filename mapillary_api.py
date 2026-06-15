@@ -9,6 +9,7 @@ import pandas as pd
 from shapely import Point, box
 import mercantile
 from tqdm import tqdm
+from PIL import Image
 
 ZOOM_LEVEL = 18
 
@@ -43,11 +44,12 @@ def create_dir_if_not_exists(path):
 
 
 def download_all_pictures_from_gdf(
-    gdf, outfolderpath, id_field="id", url_field="thumb_original_url"
+    gdf, outfolderpath, id_field="id", url_field="thumb_original_url", scale_factor=1.0
 ):
     """
     Downloads all the pictures from a GeoDataFrame (gdf) and saves them to the
     specified output folder.
+    Optionally rescales downloaded images if scale_factor != 1.0.
 
     Parameters:
         gdf (GeoDataFrame): The GeoDataFrame containing the data.
@@ -57,6 +59,7 @@ def download_all_pictures_from_gdf(
             that contains the unique identifier for each picture. Default is 'id'.
         url_field (str, optional): The name of the field in the GeoDataFrame
             that contains the URL of the picture. Default is 'thumb_original_url'.
+        scale_factor (float, optional): Scaling factor to resize the images. Default is 1.0.
 
     Returns:
         dict: Summary of download results with success/failure counts
@@ -88,10 +91,16 @@ def download_all_pictures_from_gdf(
                 failed_count += 1
                 continue
 
+            outfilepath = os.path.join(outfolderpath, str(image_id) + ".jpg")
             download_mapillary_image(
                 image_url,
-                os.path.join(outfolderpath, str(image_id) + ".jpg"),
+                outfilepath,
             )
+            if scale_factor != 1.0 and os.path.exists(outfilepath):
+                with Image.open(outfilepath) as img:
+                    new_size = (int(img.width * scale_factor), int(img.height * scale_factor))
+                    img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
+                    img_resized.save(outfilepath)
             success_count += 1
         except Exception as e:
             error_msg = (
@@ -258,7 +267,7 @@ def get_mapillary_images_metadata(
     fields=default_fields,
     token=MAPPILARY_TOKEN,
     outpath=None,
-    limit=5000,
+    limit=2000,
     timeout=300,
 ):
     """
