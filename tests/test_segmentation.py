@@ -392,3 +392,83 @@ def test_mapillary_data_to_gdf_with_detections_summary(tmp_path, monkeypatch):
 def test_detections_summary_uses_plain_floats():
     percents = mly.detections_summary([detection("nature--sky", SKY)])["class_percents"]
     assert type(percents["nature--sky"]) is float
+
+
+def _fake_images_api(points, calls, failing_bbox_contains=None):
+    """Fake /images endpoint returning the points (id, lon, lat) inside the requested bbox."""
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        min_lon, min_lat, max_lon, max_lat = map(float, params["bbox"].split(","))
+        if failing_bbox_contains and min_lon <= failing_bbox_contains[0] <= max_lon and min_lat <= failing_bbox_contains[1] <= max_lat:
+            return FakeResponse({"error": {"message": "Please reduce the amount of data you're asking for"}}, 500)
+        return FakeResponse({"data": [
+            {"id": image_id, "geometry": {"type": "Point", "coordinates": [lon, lat]}}
+            for image_id, lon, lat in points
+            if min_lon <= lon <= max_lon and min_lat <= lat <= max_lat
+        ]})
+
+    return fake_get
+
+
+def test_tiled_mapillary_data_to_gdf(tmp_path, monkeypatch):
+    import mercantile
+
+    tile = mercantile.tile(-49.2733, -25.4284, 18)
+    b = mercantile.bounds(tile)
+    w, h = b.east - b.west, b.north - b.south
+    # 3 x 3 tiles, with the polygon slightly inside their outer edges
+    polygon = box(b.west - w + w / 10, b.south - h + h / 10, b.east + w - w / 10, b.north + h - h / 10)
+    points = [
+        ("center", (b.west + b.east) / 2, (b.south + b.north) / 2),
+        ("edge", b.east, (b.south + b.north) / 2),  # on the edge shared by two tiles
+        ("west", b.west - w / 2, b.south - h / 2),
+        ("outside", b.west - w + w / 20, b.south - h / 2),  # in a tile, but outside the polygon
+    ]
+    calls = []
+    monkeypatch.setattr(mly.requests, "get", _fake_images_api(points, calls))
+    saves = []
+    monkeypatch.setattr(mly, "save_gdf", lambda gdf, path: saves.append(path))
+
+    gdf = mly.tiled_mapillary_data_to_gdf(polygon, token=TOKEN, outpath=str(tmp_path / "x.geojson"))
+
+    assert sorted(gdf["id"]) == ["center", "edge", "west"]
+    assert list(gdf.index) == [0, 1, 2]
+    assert gdf.crs == "EPSG:4326"
+    assert saves == [str(tmp_path / "x.geojson")]  # saved once, at the end
+
+    # every tile was queried in lon/lat order, with the real fields and token
+    assert len(calls) == 9
+    min_lon, min_lat, max_lon, max_lat = polygon.bounds
+    for params in calls:
+        west, south, east, north = map(float, params["bbox"].split(","))
+        assert min_lon - w <= west < east <= max_lon + w
+        assert min_lat - h <= south < north <= max_lat + h
+        assert params["fields"] == ",".join(mly.default_fields)
+        assert params["access_token"] == TOKEN
+
+    # a failing tile is skipped, the others still count
+    calls.clear()
+    monkeypatch.setattr(mly.requests, "get", _fake_images_api(points, calls, failing_bbox_contains=points[2][1:]))
+    assert sorted(mly.tiled_mapillary_data_to_gdf(polygon, token=TOKEN)["id"]) == ["center", "edge"]
+
+    # no images at all
+    monkeypatch.setattr(mly.requests, "get", _fake_images_api([], []))
+    assert mly.tiled_mapillary_data_to_gdf(polygon, token=TOKEN).empty
+
+
+def test_tiled_mapillary_data_to_gdf_with_detections_summary(monkeypatch):
+    import mercantile
+
+    b = mercantile.bounds(mercantile.tile(-49.2733, -25.4284, 18))
+    points = [("a", (b.west + b.east) / 2, (b.south + b.north) / 2)]
+    images_api = _fake_images_api(points, [])
+
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/detections"):
+            return FakeResponse({"data": [detection("nature--sky", SKY)]})
+        return images_api(url, params, timeout)
+
+    monkeypatch.setattr(mly.requests, "get", fake_get)
+    gdf = mly.tiled_mapillary_data_to_gdf(box(b.west, b.south, b.east, b.north), token=TOKEN, detections_summary=True)
+    assert gdf["detections_summary"].iloc[0]["class_percents"] == {"nature--sky": 25.0}

@@ -142,7 +142,7 @@ The examples notebook is automatically updated via GitHub Actions to ensure fres
 - `get_mapillary_images_metadata(minLon, minLat, maxLon, maxLat, ...)` - Fetch image metadata for a bounding box
 - `mapillary_data_to_gdf(data, ...)` - Convert API response to GeoDataFrame
 - `get_territory_polygon(place_name, ...)` - Get polygon for a named place
-- `tiled_mapillary_data_to_gdf(polygon, ...)` - Query large areas using tiles
+- `tiled_mapillary_data_to_gdf(polygon, ...)` - Query large areas tile by tile (skips failing tiles, removes duplicates; `detections_summary=True` adds the summary column)
 - `download_all_pictures_from_gdf(gdf, folder, ...)` - Download actual images
 - `get_coverage_tile_images(tile, ...)` - List every image of a zoom-14 coverage vector tile (with capture dates), for areas where the bbox search refuses to answer
 

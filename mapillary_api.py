@@ -528,9 +528,32 @@ def mapillary_data_to_gdf(
 
 
 def tiled_mapillary_data_to_gdf(
-    input_polygon, token, zoom=ZOOM_LEVEL, outpath=None, detections_summary=False
+    input_polygon,
+    token=MAPPILARY_TOKEN,
+    zoom=ZOOM_LEVEL,
+    outpath=None,
+    detections_summary=False,
+    fields=default_fields,
 ):
+    """
+    Query the images of an area tile by tile, to stay below the limits of the
+    /images bbox search, and return them as a single GeoDataFrame.
 
+    Parameters:
+        input_polygon (shapely Polygon): The area of interest (lon/lat).
+        token (str, optional): The Mapillary API token.
+        zoom (int, optional): Zoom level of the query tiles. Default is 18
+            (~150 m tiles).
+        outpath (str, optional): Path to save the GeoDataFrame.
+        detections_summary (bool, optional): Add a 'detections_summary'
+            column (see add_detections_summary()). Default is False.
+        fields (list, optional): Image fields to request.
+
+    Returns:
+        GeoDataFrame: The images inside the polygon, without duplicates.
+            Empty if none was found. Tiles whose request fails are skipped
+            and reported.
+    """
     # get the bbox of the input polygon:
     minLon, minLat, maxLon, maxLat = input_polygon.bounds
 
@@ -539,26 +562,44 @@ def tiled_mapillary_data_to_gdf(
 
     # get the metadata for each tile:
     gdfs_list = []
+    errors = []
 
-    for bbox in tqdm(bboxes):
-        # for i, bbox in enumerate(tqdm(bboxes)):
+    for bbox in tqdm(bboxes, desc="Querying tiles"):
+        # skip the tiles that don't intersect the input polygon:
+        if tile_bbox_to_box(bbox).disjoint(input_polygon):
+            continue
 
-        # get the tile as geometry:
-        bbox_geom = tile_bbox_to_box(bbox)
-
-        # check if the tile intersects the input polygon:
-        if not bbox_geom.disjoint(input_polygon):
-            # get the metadata for the tile:
+        try:
             data = get_mapillary_images_metadata(
-                *resort_bbox(bbox), token
-            )  # ,outpath=f'tests\small_city_tiles\{i}.json')
+                bbox.west, bbox.south, bbox.east, bbox.north, fields=fields, token=token
+            )
+        except Exception as e:
+            errors.append(f"Failed to query tile {tuple(bbox)}: {redact_token(e, token)}")
+            continue
 
-            if data.get("data"):
-                # convert the metadata to a GeoDataFrame:
-                gdfs_list.append(mapillary_data_to_gdf(data, outpath, input_polygon))
+        if data.get("data"):
+            tile_gdf = mapillary_data_to_gdf(data, filtering_polygon=input_polygon)
+            if not tile_gdf.empty:
+                gdfs_list.append(tile_gdf)
 
-    # concatenate the GeoDataFrames:
-    as_gdf = pd.concat(gdfs_list)
+    if errors:
+        print(f"❌ Errors encountered: {len(errors)} tiles failed")
+        for error in errors[:5]:
+            print(f"   - {error}")
+        if len(errors) > 5:
+            print(f"   ... and {len(errors) - 5} more errors")
+
+    if not gdfs_list:
+        print("⚠️  Warning: No images found in the input polygon")
+        return gpd.GeoDataFrame()
+
+    # concatenate the GeoDataFrames, dropping images returned by two
+    # neighbouring tiles:
+    as_gdf = gpd.GeoDataFrame(
+        pd.concat(gdfs_list, ignore_index=True), geometry="geometry", crs="EPSG:4326"
+    )
+    if "id" in as_gdf.columns:
+        as_gdf = as_gdf.drop_duplicates(subset="id", ignore_index=True)
 
     if detections_summary:
         add_detections_summary(as_gdf, token=token)
