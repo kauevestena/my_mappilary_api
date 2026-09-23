@@ -1,0 +1,1 @@
+location,continent,epoch,lon,lat,image_id,n_detections,n_classes,has_surface,detections_created_max,decode_failures,sky_above_road,error
