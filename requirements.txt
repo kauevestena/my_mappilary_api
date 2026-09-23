@@ -4,3 +4,6 @@ mercantile
 tqdm
 requests
 folium
+pillow
+numpy
+mapbox-vector-tile>=2.0

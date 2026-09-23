@@ -2,14 +2,20 @@ from math import cos, pi
 from time import sleep
 import os
 import json
+import base64
+import zlib
 import requests
 import wget
 import geopandas as gpd
 import pandas as pd
 from shapely import Point, box
+from shapely.geometry import Polygon, shape
+from shapely.affinity import scale as scale_geometry
 import mercantile
+import mapbox_vector_tile
+import numpy as np
 from tqdm import tqdm
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ZOOM_LEVEL = 18
 
@@ -250,6 +256,19 @@ def get_mapillary_token(token_file="mapillary_token", verbose=False):
     return ""
 
 
+def redact_token(message, token):
+    """
+    Replace every occurrence of the API token in a message (e.g. an exception
+    whose text contains the request URL) with '***'.
+    """
+    message = str(message)
+    if token:
+        message = message.replace(token, "***")
+        # requests URL-encodes the "|" separators of Mapillary tokens
+        message = message.replace(requests.utils.quote(token, safe=""), "***")
+    return message
+
+
 # right after the function definition
 MAPPILARY_TOKEN = get_mapillary_token()
 
@@ -269,6 +288,8 @@ def get_mapillary_images_metadata(
     outpath=None,
     limit=2000,
     timeout=300,
+    start_captured_at=None,
+    end_captured_at=None,
 ):
     """
     Request images from Mapillary API given a bbox
@@ -279,6 +300,10 @@ def get_mapillary_images_metadata(
         maxLat (float): The latitude of the second coordinate.
         maxLon (float): The longitude of the second coordinate.
         token (str): The Mapillary API token.
+        start_captured_at (str, optional): Only images captured at or after
+            this ISO 8601 datetime (e.g. '2019-01-01T00:00:00Z').
+        end_captured_at (str, optional): Only images captured before this
+            ISO 8601 datetime.
 
     Returns:
         dict: A dictionary containing the response from the API.
@@ -319,13 +344,24 @@ def get_mapillary_images_metadata(
         "access_token": token,
         "fields": ",".join(fields),
     }
+    if start_captured_at:
+        params["start_captured_at"] = start_captured_at
+    if end_captured_at:
+        params["end_captured_at"] = end_captured_at
 
     try:
         response = requests.get(url, params=params, timeout=timeout)
         response.raise_for_status()  # Raises HTTPError for bad status codes
     except requests.exceptions.RequestException as e:
+        # include the API's own error message, if any
+        detail = ""
+        if getattr(e, "response", None) is not None:
+            try:
+                detail = f" ({e.response.json()['error']['message']})"
+            except Exception:
+                pass
         raise requests.exceptions.RequestException(
-            f"Failed to fetch data from Mapillary API: {e}"
+            f"Failed to fetch data from Mapillary API: {redact_token(str(e) + detail, token)}"
         )
 
     try:
@@ -428,7 +464,13 @@ def download_mapillary_image(url, outfilepath, cooldown=1):
         raise  # Re-raise the exception so calling code can handle it
 
 
-def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
+def mapillary_data_to_gdf(
+    data,
+    outpath=None,
+    filtering_polygon=None,
+    detections_summary=False,
+    token=MAPPILARY_TOKEN,
+):
     """
     Convert Mapillary API response data to a GeoDataFrame.
 
@@ -436,6 +478,11 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
         data (dict): Mapillary API response containing image metadata
         outpath (str, optional): Path to save the GeoDataFrame
         filtering_polygon (optional): Polygon to filter results spatially
+        detections_summary (bool, optional): Add a 'detections_summary'
+            column (see add_detections_summary()). Requests the detections of
+            every image. Default is False.
+        token (str, optional): The Mapillary API token, used when
+            detections_summary is True.
 
     Returns:
         GeoDataFrame: Processed image data with geometry
@@ -461,11 +508,14 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
             selected_columns_to_str(as_gdf)
 
             if filtering_polygon:
-                as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)]
+                as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)].copy()
+
+            if detections_summary:
+                add_detections_summary(as_gdf, token=token)
 
             if outpath:
                 try:
-                    as_gdf.to_file(outpath)
+                    save_gdf(as_gdf, outpath)
                 except Exception as e:
                     print(f"⚠️  Warning: Could not save to {outpath}: {e}")
 
@@ -477,8 +527,33 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
         return gpd.GeoDataFrame()
 
 
-def tiled_mapillary_data_to_gdf(input_polygon, token, zoom=ZOOM_LEVEL, outpath=None):
+def tiled_mapillary_data_to_gdf(
+    input_polygon,
+    token=MAPPILARY_TOKEN,
+    zoom=ZOOM_LEVEL,
+    outpath=None,
+    detections_summary=False,
+    fields=default_fields,
+):
+    """
+    Query the images of an area tile by tile, to stay below the limits of the
+    /images bbox search, and return them as a single GeoDataFrame.
 
+    Parameters:
+        input_polygon (shapely Polygon): The area of interest (lon/lat).
+        token (str, optional): The Mapillary API token.
+        zoom (int, optional): Zoom level of the query tiles. Default is 18
+            (~150 m tiles).
+        outpath (str, optional): Path to save the GeoDataFrame.
+        detections_summary (bool, optional): Add a 'detections_summary'
+            column (see add_detections_summary()). Default is False.
+        fields (list, optional): Image fields to request.
+
+    Returns:
+        GeoDataFrame: The images inside the polygon, without duplicates.
+            Empty if none was found. Tiles whose request fails are skipped
+            and reported.
+    """
     # get the bbox of the input polygon:
     minLon, minLat, maxLon, maxLat = input_polygon.bounds
 
@@ -487,29 +562,50 @@ def tiled_mapillary_data_to_gdf(input_polygon, token, zoom=ZOOM_LEVEL, outpath=N
 
     # get the metadata for each tile:
     gdfs_list = []
+    errors = []
 
-    for bbox in tqdm(bboxes):
-        # for i, bbox in enumerate(tqdm(bboxes)):
+    for bbox in tqdm(bboxes, desc="Querying tiles"):
+        # skip the tiles that don't intersect the input polygon:
+        if tile_bbox_to_box(bbox).disjoint(input_polygon):
+            continue
 
-        # get the tile as geometry:
-        bbox_geom = tile_bbox_to_box(bbox)
-
-        # check if the tile intersects the input polygon:
-        if not bbox_geom.disjoint(input_polygon):
-            # get the metadata for the tile:
+        try:
             data = get_mapillary_images_metadata(
-                *resort_bbox(bbox), token
-            )  # ,outpath=f'tests\small_city_tiles\{i}.json')
+                bbox.west, bbox.south, bbox.east, bbox.north, fields=fields, token=token
+            )
+        except Exception as e:
+            errors.append(f"Failed to query tile {tuple(bbox)}: {redact_token(e, token)}")
+            continue
 
-            if data.get("data"):
-                # convert the metadata to a GeoDataFrame:
-                gdfs_list.append(mapillary_data_to_gdf(data, outpath, input_polygon))
+        if data.get("data"):
+            tile_gdf = mapillary_data_to_gdf(data, filtering_polygon=input_polygon)
+            if not tile_gdf.empty:
+                gdfs_list.append(tile_gdf)
 
-    # concatenate the GeoDataFrames:
-    as_gdf = pd.concat(gdfs_list)
+    if errors:
+        print(f"❌ Errors encountered: {len(errors)} tiles failed")
+        for error in errors[:5]:
+            print(f"   - {error}")
+        if len(errors) > 5:
+            print(f"   ... and {len(errors) - 5} more errors")
+
+    if not gdfs_list:
+        print("⚠️  Warning: No images found in the input polygon")
+        return gpd.GeoDataFrame()
+
+    # concatenate the GeoDataFrames, dropping images returned by two
+    # neighbouring tiles:
+    as_gdf = gpd.GeoDataFrame(
+        pd.concat(gdfs_list, ignore_index=True), geometry="geometry", crs="EPSG:4326"
+    )
+    if "id" in as_gdf.columns:
+        as_gdf = as_gdf.drop_duplicates(subset="id", ignore_index=True)
+
+    if detections_summary:
+        add_detections_summary(as_gdf, token=token)
 
     if outpath:
-        as_gdf.to_file(outpath)
+        save_gdf(as_gdf, outpath)
 
     return as_gdf
 
@@ -603,3 +699,679 @@ def filter_metadata_with_polygon(data, polygon, anti_rounding_factor=1000000):
             continue
 
     return filtered_data
+
+
+# ---------------------------------------------------------------------------
+# Coverage vector tiles
+# ---------------------------------------------------------------------------
+#
+# The /images bbox search refuses areas with many images ("Please reduce the
+# amount of data you're asking for"). The coverage vector tiles list every
+# image of a zoom-14 tile (~2.4 km) with its capture date instead.
+
+COVERAGE_TILES_URL = "https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}"
+IMAGES_TILE_ZOOM = 14
+
+
+def get_coverage_tile_images(tile, token=MAPPILARY_TOKEN, timeout=120):
+    """
+    Get the images of a Mapillary coverage vector tile ('image' layer).
+
+    Parameters:
+        tile (mercantile.Tile): The tile, at zoom 14 (the only zoom level
+            with the image layer), e.g. mercantile.tile(lon, lat, 14).
+        token (str): The Mapillary API token.
+        timeout (int, optional): Request timeout in seconds.
+
+    Returns:
+        list: Image dictionaries shaped like the /images API data (so that
+            mapillary_data_to_gdf({"data": images}) works), with the tile's
+            properties: id, captured_at (epoch milliseconds), sequence_id,
+            is_pano, compass_angle, creator_id, organization_id.
+
+    Raises:
+        requests.exceptions.RequestException: For network-related errors
+        ValueError: For a missing token or an undecodable tile
+    """
+    if not token:
+        raise ValueError(
+            "No valid Mapillary API token provided. Please set API_TOKEN environment variable or create a mapillary_token file."
+        )
+
+    url = COVERAGE_TILES_URL.format(z=tile.z, x=tile.x, y=tile.y)
+    try:
+        response = requests.get(url, params={"access_token": token}, timeout=timeout)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch coverage tile from Mapillary: {redact_token(e, token)}"
+        )
+
+    data = response.content
+    if not data:
+        return []
+    try:
+        if data[:2] == b"\x1f\x8b":
+            data = zlib.decompress(data, 16 + zlib.MAX_WBITS)
+        decoded = mapbox_vector_tile.decode(data, default_options={"y_coord_down": True})
+    except Exception as e:
+        raise ValueError(f"Cannot decode coverage tile {tuple(tile)}: {e}")
+
+    layer = decoded.get("image")
+    if not layer:
+        return []
+
+    # tile pixel coordinates -> web mercator -> lon/lat
+    extent = layer.get("extent", 4096)
+    left, bottom, right, top = mercantile.xy_bounds(tile)
+
+    images = []
+    for feature in layer.get("features", []):
+        if feature["geometry"]["type"] != "Point":
+            continue
+        px, py = feature["geometry"]["coordinates"]
+        lon, lat = mercantile.lnglat(
+            left + (right - left) * px / extent, top - (top - bottom) * py / extent
+        )
+        image = dict(feature.get("properties", {}))
+        image.setdefault("id", feature.get("id"))
+        image["geometry"] = {"type": "Point", "coordinates": [lon, lat]}
+        images.append(image)
+
+    return images
+
+
+# ---------------------------------------------------------------------------
+# Semantic segmentation (detections)
+# ---------------------------------------------------------------------------
+#
+# Mapillary runs semantic segmentation on its servers and exposes the result
+# per image as "detections": one entry per segmented region, where "value" is
+# the class (e.g. "construction--flat--road", "nature--sky") and "geometry" is
+# a base64-encoded Mapbox Vector Tile containing the region polygon(s) in
+# image space, normalized to the tile extent (usually 4096).
+
+GRAPH_API_URL = "https://graph.mapillary.com"
+
+DETECTION_FIELDS = ["id", "value", "geometry", "created_at"]
+
+# Top-level prefixes of the detection classes, grouped by kind
+SURFACE_CLASS_PREFIXES = ("construction", "nature", "void")
+MARKING_CLASS_PREFIXES = ("marking",)
+OBJECT_CLASS_PREFIXES = ("object", "human", "animal")
+TRAFFIC_SIGN_CLASS_PREFIXES = ("regulatory", "warning", "information", "complementary")
+
+
+def detection_class_group(value):
+    """
+    Return the group of a detection class: 'surface' (full-scene classes such
+    as road, sky, building), 'marking' (road markings), 'object',
+    'traffic_sign' or 'other'.
+    """
+    prefix = str(value).split("--")[0]
+    if prefix in SURFACE_CLASS_PREFIXES:
+        return "surface"
+    if prefix in MARKING_CLASS_PREFIXES:
+        return "marking"
+    if prefix in OBJECT_CLASS_PREFIXES:
+        return "object"
+    if prefix in TRAFFIC_SIGN_CLASS_PREFIXES:
+        return "traffic_sign"
+    return "other"
+
+
+def _graph_api_get(url, params=None, token=MAPPILARY_TOKEN, timeout=60):
+    """
+    GET a Mapillary Graph API URL and return the parsed JSON.
+
+    The token is never included in raised error messages.
+
+    Raises:
+        requests.exceptions.RequestException: For network-related errors
+        ValueError: For API errors, invalid JSON or a missing token
+    """
+    if not token:
+        raise ValueError(
+            "No valid Mapillary API token provided. Please set API_TOKEN environment variable or create a mapillary_token file."
+        )
+
+    params = dict(params or {})
+    if "access_token=" not in url:
+        params["access_token"] = token
+
+    try:
+        response = requests.get(url, params=params, timeout=timeout)
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch data from Mapillary API: {redact_token(e, token)}"
+        )
+
+    try:
+        as_dict = response.json()
+    except ValueError:
+        as_dict = None
+
+    # API errors come with a JSON body, often along with a 4xx status code
+    if isinstance(as_dict, dict) and "error" in as_dict:
+        error = as_dict["error"]
+        error_msg = error.get("message", "Unknown API error") if isinstance(error, dict) else error
+        raise ValueError(
+            f"Mapillary API error (HTTP {response.status_code}): {redact_token(error_msg, token)}"
+        )
+
+    try:
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch data from Mapillary API: {redact_token(e, token)}"
+        )
+
+    if as_dict is None:
+        raise ValueError("Invalid JSON response from Mapillary API")
+
+    return as_dict
+
+
+def get_image_detections(
+    image_id, token=MAPPILARY_TOKEN, fields=DETECTION_FIELDS, timeout=60, max_pages=100
+):
+    """
+    Get the detections (semantic segmentation regions) of a Mapillary image.
+
+    Parameters:
+        image_id (str or int): The Mapillary image ID.
+        token (str): The Mapillary API token.
+        fields (list, optional): Detection fields to request. Default is
+            ['id', 'value', 'geometry', 'created_at'].
+        timeout (int, optional): Request timeout in seconds.
+        max_pages (int, optional): Maximum number of result pages to follow.
+
+    Returns:
+        list: Detection dictionaries. Empty if the image has no detections.
+
+    Raises:
+        requests.exceptions.RequestException: For network-related errors
+        ValueError: For invalid API responses or missing token
+    """
+    url = f"{GRAPH_API_URL}/{image_id}/detections"
+    params = {"fields": ",".join(fields)}
+
+    detections = []
+    for _ in range(max_pages):
+        as_dict = _graph_api_get(url, params, token=token, timeout=timeout)
+        detections.extend(as_dict.get("data", []))
+
+        next_url = as_dict.get("paging", {}).get("next")
+        if not next_url:
+            break
+        # the "next" URL already carries all the query parameters
+        url, params = next_url, None
+
+    return detections
+
+
+def get_image_size(image_id, token=MAPPILARY_TOKEN, timeout=60):
+    """
+    Get the (width, height) in pixels of the original Mapillary image.
+    """
+    as_dict = _graph_api_get(
+        f"{GRAPH_API_URL}/{image_id}", {"fields": "width,height"}, token=token, timeout=timeout
+    )
+    return int(as_dict["width"]), int(as_dict["height"])
+
+
+def _decode_detection_tile(geometry, y_coord_down=True):
+    """
+    Decode the base64-encoded vector tile of a detection into the plain
+    {layer: {"extent": ..., "features": [...]}} structure of mapbox_vector_tile,
+    where feature geometries are GeoJSON-like coordinate lists.
+    """
+    try:
+        data = base64.b64decode(geometry)
+        # tolerate gzip-compressed tiles
+        if data[:2] == b"\x1f\x8b":
+            data = zlib.decompress(data, 16 + zlib.MAX_WBITS)
+        return mapbox_vector_tile.decode(
+            data, default_options={"y_coord_down": y_coord_down}
+        )
+    except Exception as e:
+        raise ValueError(f"Cannot decode detection geometry: {e}")
+
+
+def decode_detection_geometry(geometry, width=1, height=1, y_coord_down=True):
+    """
+    Decode the base64-encoded vector tile geometry of a Mapillary detection.
+
+    Parameters:
+        geometry (str): The 'geometry' field of a detection.
+        width (float, optional): Image width used to scale the coordinates.
+            Default is 1 (normalized coordinates).
+        height (float, optional): Image height used to scale the coordinates.
+            Default is 1 (normalized coordinates).
+        y_coord_down (bool, optional): Keep the tile's native y axis, which
+            points down like image rows. Default is True.
+
+    Returns:
+        Polygon or MultiPolygon: The region in image coordinates, with the
+            origin at the top-left corner of the image.
+
+    Raises:
+        ValueError: If the geometry cannot be decoded
+    """
+    tile = _decode_detection_tile(geometry, y_coord_down)
+
+    parts = []
+    for layer in tile.values():
+        extent = layer.get("extent", 4096)
+        for feature in layer.get("features", []):
+            geom = shape(feature["geometry"])
+            if geom.is_empty:
+                continue
+            if not geom.is_valid:
+                geom = geom.buffer(0)
+            parts.append(
+                scale_geometry(
+                    geom, xfact=width / extent, yfact=height / extent, origin=(0, 0)
+                )
+            )
+
+    if not parts:
+        raise ValueError("Detection geometry contains no features")
+
+    if len(parts) == 1:
+        return parts[0]
+    return gpd.GeoSeries(parts).union_all()
+
+
+def _ring_area(ring):
+    """Area of a ring given as a list of [x, y] (shoelace formula)."""
+    coords = np.asarray(ring, dtype=float)
+    if len(coords) < 3:
+        return 0.0
+    x, y = coords[:, 0], coords[:, 1]
+    return abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2
+
+
+def _encoded_geometry_fraction(geometry):
+    """
+    Fraction of the image covered by an encoded detection geometry, computed
+    directly from the decoded coordinate lists (no geometry objects).
+    """
+    fraction = 0.0
+    for layer in _decode_detection_tile(geometry).values():
+        extent = layer.get("extent", 4096)
+        for feature in layer.get("features", []):
+            geom = feature["geometry"]
+            if geom["type"] == "Polygon":
+                polygons = [geom["coordinates"]]
+            elif geom["type"] == "MultiPolygon":
+                polygons = geom["coordinates"]
+            else:
+                continue
+            for rings in polygons:
+                if not rings:
+                    continue
+                area = _ring_area(rings[0]) - sum(_ring_area(r) for r in rings[1:])
+                fraction += max(area, 0.0) / extent**2
+    return fraction
+
+
+def detections_summary(detections):
+    """
+    Summarize the detections of an image without building any geometry.
+
+    Parameters:
+        detections (list): Detections from get_image_detections() (the
+            'value' and 'geometry' fields are used).
+
+    Returns:
+        dict: {
+            "present": bool, whether the image has detections,
+            "number_available_classes": int, number of distinct classes,
+            "class_percents": {class_value: percent of the image area},
+                sorted from the largest to the smallest class,
+        }
+        The percentages are areas of Mapillary's polygons; regions of a
+        semantic segmentation don't overlap, so they sum to at most ~100 and
+        the rest of the image is unlabeled.
+    """
+    percents = {}
+    for detection in detections:
+        value = detection.get("value")
+        if not detection.get("geometry"):
+            continue
+        try:
+            fraction = _encoded_geometry_fraction(detection["geometry"])
+        except ValueError as e:
+            print(f"⚠️  Warning: Skipping detection {detection.get('id')}: {e}")
+            continue
+        percents[value] = percents.get(value, 0.0) + 100 * fraction
+
+    return {
+        "present": len(detections) > 0,
+        "number_available_classes": len({d.get("value") for d in detections}),
+        "class_percents": {
+            value: round(float(percent), 4)
+            for value, percent in sorted(percents.items(), key=lambda item: item[1], reverse=True)
+        },
+    }
+
+
+def add_detections_summary(
+    gdf, token=MAPPILARY_TOKEN, id_field="id", column="detections_summary", cooldown=0
+):
+    """
+    Add a column with the detections summary (see detections_summary()) of
+    each image of a GeoDataFrame, e.g. one from mapillary_data_to_gdf().
+
+    Only the detection classes and encoded geometries are requested, and the
+    geometries are never turned into geometry objects.
+
+    Parameters:
+        gdf (GeoDataFrame): The images, one row per image.
+        token (str): The Mapillary API token.
+        id_field (str, optional): Field with the image ID. Default is 'id'.
+        column (str, optional): Name of the new column. Default is
+            'detections_summary'.
+        cooldown (float, optional): Seconds to wait between images.
+
+    Returns:
+        GeoDataFrame: The same GeoDataFrame, with the new column. Images whose
+            detections could not be requested get None.
+    """
+    if id_field not in gdf.columns:
+        raise ValueError(f"ID field '{id_field}' not found in GeoDataFrame columns")
+
+    summaries = []
+    errors = []
+    for image_id in tqdm(gdf[id_field], total=len(gdf), desc="Summarizing detections"):
+        try:
+            detections = get_image_detections(
+                image_id, token=token, fields=["value", "geometry"]
+            )
+            summaries.append(detections_summary(detections))
+        except Exception as e:
+            summaries.append(None)
+            errors.append(
+                f"Failed to get detections for image ID {image_id}: {redact_token(e, token)}"
+            )
+        if cooldown:
+            sleep(cooldown)
+
+    # a plain object array, so that duplicate index labels (e.g. after
+    # pd.concat) don't get in the way
+    values = np.empty(len(summaries), dtype=object)
+    values[:] = summaries
+    gdf[column] = values
+
+    with_detections = sum(1 for s in summaries if s and s["present"])
+    print(
+        f"✅ Detections summarized: {with_detections} with detections, {len(summaries) - with_detections - len(errors)} without, {len(errors)} failed"
+    )
+    if errors:
+        print(f"❌ Errors encountered: {len(errors)}")
+        for error in errors[:5]:
+            print(f"   - {error}")
+        if len(errors) > 5:
+            print(f"   ... and {len(errors) - 5} more errors")
+
+    return gdf
+
+
+def save_gdf(gdf, outpath):
+    """
+    Save a GeoDataFrame, serializing dict columns (e.g. detections_summary)
+    as JSON text, since vector file formats cannot store them.
+    """
+    to_save = gdf.copy()
+    for column in to_save.columns:
+        if column != to_save.geometry.name and any(isinstance(v, dict) for v in to_save[column]):
+            to_save[column] = to_save[column].apply(
+                lambda v: json.dumps(v, ensure_ascii=False) if v is not None else None
+            )
+    to_save.to_file(outpath)
+
+
+def detections_to_gdf(detections, width=1, height=1, y_coord_down=True):
+    """
+    Convert Mapillary detections to a GeoDataFrame of image-space polygons.
+
+    The geometries are in pixel coordinates (origin at the top-left corner,
+    y pointing down) when width and height are given, or normalized to [0, 1]
+    otherwise. The GeoDataFrame has no CRS.
+
+    Parameters:
+        detections (list): Detections from get_image_detections().
+        width (float, optional): Image width. Default is 1 (normalized).
+        height (float, optional): Image height. Default is 1 (normalized).
+        y_coord_down (bool, optional): See decode_detection_geometry().
+
+    Returns:
+        GeoDataFrame: One row per detection, plus a 'group' column
+            (see detection_class_group()).
+    """
+    records = []
+    for detection in detections:
+        if not detection.get("geometry"):
+            continue
+        try:
+            geom = decode_detection_geometry(
+                detection["geometry"], width, height, y_coord_down
+            )
+        except ValueError as e:
+            print(f"⚠️  Warning: Skipping detection {detection.get('id')}: {e}")
+            continue
+
+        record = {k: v for k, v in detection.items() if k != "geometry"}
+        record["group"] = detection_class_group(detection.get("value"))
+        record["geometry"] = geom
+        records.append(record)
+
+    if not records:
+        return gpd.GeoDataFrame(
+            columns=["id", "value", "created_at", "group", "geometry"],
+            geometry="geometry",
+        )
+
+    as_gdf = gpd.GeoDataFrame(records, geometry="geometry")
+    selected_columns_to_str(as_gdf, dict)
+    return as_gdf
+
+
+def _polygon_parts(geom):
+    if geom.geom_type == "Polygon":
+        return [geom]
+    if hasattr(geom, "geoms"):
+        return [p for g in geom.geoms for p in _polygon_parts(g)]
+    return []
+
+
+def detections_to_mask(
+    detections, width, height, class_index=None, y_coord_down=True
+):
+    """
+    Rasterize Mapillary detections into a semantic segmentation label mask.
+
+    Regions are drawn from the largest to the smallest outline, so smaller
+    objects stay on top of larger regions. Holes are left unlabeled unless
+    another region fills them.
+
+    Parameters:
+        detections (list): Detections from get_image_detections().
+        width (int): Mask width in pixels.
+        height (int): Mask height in pixels.
+        class_index (dict, optional): Existing {class_value: label} mapping to
+            extend, so that labels are consistent across images.
+        y_coord_down (bool, optional): See decode_detection_geometry().
+
+    Returns:
+        tuple: (mask, class_index), where mask is a (height, width) uint16
+            array with 0 meaning unlabeled, and class_index maps each class
+            value to its label.
+    """
+    width, height = int(width), int(height)
+    if width <= 0 or height <= 0:
+        raise ValueError("Mask width and height must be positive")
+
+    class_index = dict(class_index or {})
+    gdf = detections_to_gdf(detections, width, height, y_coord_down)
+
+    for value in sorted(gdf["value"].unique()) if not gdf.empty else []:
+        if value not in class_index:
+            class_index[value] = max(class_index.values(), default=0) + 1
+
+    if max(class_index.values(), default=0) > np.iinfo(np.uint16).max:
+        raise ValueError("Too many classes for a uint16 mask")
+
+    canvas = Image.new("I", (width, height), 0)
+    draw = ImageDraw.Draw(canvas)
+
+    shapes = []
+    for value, geom in zip(gdf["value"], gdf.geometry):
+        for part in _polygon_parts(geom):
+            outline_area = abs(Polygon(part.exterior).area)
+            shapes.append((outline_area, class_index[value], part))
+
+    for _, label, part in sorted(shapes, key=lambda s: s[0], reverse=True):
+        draw.polygon(list(part.exterior.coords), fill=label)
+        for interior in part.interiors:
+            draw.polygon(list(interior.coords), fill=0)
+
+    mask = np.array(canvas, dtype=np.int32).astype(np.uint16)
+    return mask, class_index
+
+
+def class_color(value):
+    """
+    Deterministic RGB color for a detection class.
+    """
+    digest = zlib.crc32(str(value).encode("utf-8"))
+    return (64 + digest % 192, 64 + (digest >> 8) % 192, 64 + (digest >> 16) % 192)
+
+
+def colorize_mask(mask, class_index):
+    """
+    Convert a label mask into an RGB image (uint8 array) for visualization.
+    Unlabeled pixels are black.
+    """
+    lut = np.zeros((max(class_index.values(), default=0) + 1, 3), dtype=np.uint8)
+    for value, label in class_index.items():
+        lut[label] = class_color(value)
+    return lut[mask]
+
+
+def save_mask(mask, outpath):
+    """
+    Save a label mask as a 16-bit grayscale PNG (pixel value = class label).
+    """
+    Image.fromarray(mask.astype(np.uint16)).save(outpath)
+
+
+def download_segmentation_masks_from_gdf(
+    gdf,
+    outfolderpath,
+    id_field="id",
+    width_field="width",
+    height_field="height",
+    token=MAPPILARY_TOKEN,
+    scale_factor=1.0,
+    save_detections=True,
+    save_colorized=False,
+    cooldown=0,
+):
+    """
+    Download the semantic segmentation (detections) of every image in a
+    GeoDataFrame and save them as label masks.
+
+    For each image with detections, writes:
+        {id}_mask.png: 16-bit label mask (see detections_to_mask())
+        {id}_classes.json: {class_value: label} mapping of the mask
+        {id}_detections.json: raw detections (if save_detections)
+        {id}_mask_color.png: colorized mask (if save_colorized)
+
+    Parameters:
+        gdf (GeoDataFrame): The GeoDataFrame containing the images.
+        outfolderpath (str): The path to the output folder.
+        id_field (str, optional): Field with the image ID. Default is 'id'.
+        width_field (str, optional): Field with the image width. Default is
+            'width'. The size is requested from the API if the field is missing.
+        height_field (str, optional): Field with the image height. Default is
+            'height'.
+        token (str): The Mapillary API token.
+        scale_factor (float, optional): Scaling factor of the masks relative
+            to the original image size. Default is 1.0.
+        save_detections (bool, optional): Save raw detections. Default is True.
+        save_colorized (bool, optional): Save colorized masks. Default is False.
+        cooldown (float, optional): Seconds to wait between images.
+
+    Returns:
+        dict: Summary with success/empty/failed counts and errors. 'empty'
+            counts images for which Mapillary returned no detections.
+    """
+    if gdf.empty:
+        print("⚠️  Warning: Empty GeoDataFrame provided - nothing to download")
+        return {"success": 0, "empty": 0, "failed": 0, "errors": []}
+
+    if id_field not in gdf.columns:
+        raise ValueError(f"ID field '{id_field}' not found in GeoDataFrame columns")
+
+    create_dir_if_not_exists(outfolderpath)
+
+    success_count = 0
+    empty_count = 0
+    failed_count = 0
+    errors = []
+
+    for _, row in tqdm(gdf.iterrows(), total=len(gdf), desc="Downloading masks"):
+        image_id = row.get(id_field, "unknown")
+        try:
+            detections = get_image_detections(image_id, token=token)
+            if not detections:
+                empty_count += 1
+                continue
+
+            width, height = row.get(width_field), row.get(height_field)
+            if pd.isna(width) or pd.isna(height) or not width or not height:
+                width, height = get_image_size(image_id, token=token)
+
+            mask, class_index = detections_to_mask(
+                detections,
+                max(1, round(float(width) * scale_factor)),
+                max(1, round(float(height) * scale_factor)),
+            )
+
+            basepath = os.path.join(outfolderpath, str(image_id))
+            save_mask(mask, basepath + "_mask.png")
+            dump_json(class_index, basepath + "_classes.json")
+            if save_detections:
+                dump_json(detections, basepath + "_detections.json")
+            if save_colorized:
+                Image.fromarray(colorize_mask(mask, class_index)).save(
+                    basepath + "_mask_color.png"
+                )
+            success_count += 1
+        except Exception as e:
+            errors.append(
+                f"Failed to download mask for image ID {image_id}: {redact_token(e, token)}"
+            )
+            failed_count += 1
+
+        if cooldown:
+            sleep(cooldown)
+
+    print(
+        f"✅ Download completed: {success_count} successful, {empty_count} without detections, {failed_count} failed"
+    )
+    if errors:
+        print(f"❌ Errors encountered: {len(errors)}")
+        for error in errors[:5]:
+            print(f"   - {error}")
+        if len(errors) > 5:
+            print(f"   ... and {len(errors) - 5} more errors")
+
+    return {
+        "success": success_count,
+        "empty": empty_count,
+        "failed": failed_count,
+        "errors": errors,
+    }

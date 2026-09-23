@@ -1,0 +1,65 @@
+name: Segmentation Availability Survey
+
+on:
+  # Allow manual triggering
+  workflow_dispatch:
+    inputs:
+      per_cell:
+        description: Images sampled per location × epoch
+        default: '3'
+
+permissions:
+  contents: write  # Allow committing the survey report
+
+jobs:
+  survey:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pytest tabulate
+
+    - name: Run offline tests
+      run: pytest tests -q
+
+    - name: Run survey
+      env:
+        API_TOKEN: ${{ secrets.API_TOKEN }}
+      run: |
+        python scripts/segmentation_survey.py --out survey --raw-out survey_raw \
+          --per-cell "${{ github.event.inputs.per_cell || '3' }}"
+
+    - name: Upload survey outputs
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: segmentation-survey
+        path: |
+          survey/
+          survey_raw/
+        if-no-files-found: ignore
+
+    - name: Commit survey report
+      run: |
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add survey/
+        if git diff --cached --quiet; then
+          echo "No changes to commit"
+          exit 0
+        fi
+        git commit -m "🤖 Update segmentation availability survey [skip ci]"
+        git pull --rebase origin "${GITHUB_REF_NAME}"
+        git push origin "HEAD:${GITHUB_REF_NAME}"
