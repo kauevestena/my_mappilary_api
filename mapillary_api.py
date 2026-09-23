@@ -736,7 +736,8 @@ GRAPH_API_URL = "https://graph.mapillary.com"
 DETECTION_FIELDS = ["id", "value", "geometry", "created_at"]
 
 # Top-level prefixes of the detection classes, grouped by kind
-SURFACE_CLASS_PREFIXES = ("construction", "nature", "void", "marking")
+SURFACE_CLASS_PREFIXES = ("construction", "nature", "void")
+MARKING_CLASS_PREFIXES = ("marking",)
 OBJECT_CLASS_PREFIXES = ("object", "human", "animal")
 TRAFFIC_SIGN_CLASS_PREFIXES = ("regulatory", "warning", "information", "complementary")
 
@@ -744,11 +745,14 @@ TRAFFIC_SIGN_CLASS_PREFIXES = ("regulatory", "warning", "information", "compleme
 def detection_class_group(value):
     """
     Return the group of a detection class: 'surface' (full-scene classes such
-    as road, sky, building), 'object', 'traffic_sign' or 'other'.
+    as road, sky, building), 'marking' (road markings), 'object',
+    'traffic_sign' or 'other'.
     """
     prefix = str(value).split("--")[0]
     if prefix in SURFACE_CLASS_PREFIXES:
         return "surface"
+    if prefix in MARKING_CLASS_PREFIXES:
+        return "marking"
     if prefix in OBJECT_CLASS_PREFIXES:
         return "object"
     if prefix in TRAFFIC_SIGN_CLASS_PREFIXES:

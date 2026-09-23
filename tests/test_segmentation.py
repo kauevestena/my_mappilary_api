@@ -184,7 +184,8 @@ def test_errors_do_not_leak_token(monkeypatch):
 
 
 def test_detection_class_group():
-    assert mly.detection_class_group("marking--discrete--crosswalk-zebra") == "surface"
+    assert mly.detection_class_group("construction--flat--road") == "surface"
+    assert mly.detection_class_group("marking--discrete--crosswalk-zebra") == "marking"
     assert mly.detection_class_group("human--person--individual") == "object"
     assert mly.detection_class_group("warning--pedestrians-crossing--g4") == "traffic_sign"
     assert mly.detection_class_group("something-new") == "other"

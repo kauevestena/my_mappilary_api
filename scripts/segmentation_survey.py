@@ -184,6 +184,7 @@ def analyze_image(image, token, raw_out):
         "n_detections": 0,
         "n_classes": 0,
         "n_surface": 0,
+        "n_marking": 0,
         "n_object": 0,
         "n_traffic_sign": 0,
         "n_other": 0,
@@ -213,7 +214,7 @@ def analyze_image(image, token, raw_out):
 
     values = [d.get("value") for d in detections]
     groups = Counter(mly.detection_class_group(v) for v in values)
-    for group in ("surface", "object", "traffic_sign", "other"):
+    for group in ("surface", "marking", "object", "traffic_sign", "other"):
         record[f"n_{group}"] = groups.get(group, 0)
     record["n_classes"] = len(set(values))
     record["has_surface"] = groups.get("surface", 0) > 0
@@ -300,7 +301,7 @@ def write_report(df, cells, samples, out, started, finished, probes=(), strategy
         )
     # distinguish cells without imagery from cells whose requests failed
     for cell in cells.itertuples():
-        if matrix.at[cell.location, cell.epoch] is None:
+        if pd.isna(matrix.at[cell.location, cell.epoch]):
             matrix.at[cell.location, cell.epoch] = "err" if cell.error or cell.images_found else "·"
 
     processing_years = (
@@ -343,8 +344,8 @@ def write_report(df, cells, samples, out, started, finished, probes=(), strategy
         "",
         "- **% with detections**: images for which the API returned at least one detection.",
         "- **% with full-scene classes**: images with at least one *surface* class "
-        "(`construction--*`, `nature--*`, `marking--*`, `void--*`), i.e. a real semantic segmentation "
-        "rather than only object or traffic-sign detections.",
+        "(`construction--*`, `nature--*`, `void--*`), i.e. a real semantic segmentation "
+        "rather than only object, road-marking or traffic-sign detections.",
         "- **Latest detection created_at**: when Mapillary produced the newest detection of the group "
         "(processing date, not capture date).",
         "",
