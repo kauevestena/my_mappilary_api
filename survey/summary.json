@@ -1,36 +1,182 @@
 {
-    "started": "2026-09-23 15:01",
-    "finished": "2026-09-23 15:01",
-    "search_strategy": "none: every image search failed, see the API probes",
+    "started": "2026-09-23 15:05",
+    "finished": "2026-09-23 15:18",
+    "search_strategy": "all images of the zoom-14 coverage vector tile around each location, split into epochs by captured_at",
     "api_probes": [
         {
-            "probe": "survey fields, no date filter",
-            "ok": false,
-            "images": 0,
-            "error": "Failed to fetch data from Mapillary API: 500 Server Error: Internal Server Error for url: https://graph.mapillary.com/images?bbox=-49.2833%2C-25.4384%2C-49.2633%2C-25.4184&limit=10&access_token=***&fields=id%2Ccaptured_at%2Cgeometry%2Cwidth%2Cheight%2Cis_pano%2Csequence%2Cthumb_1024_url (Please reduce the amount of data you're asking for, then retry your request)"
+            "probe": "coverage vector tile (zoom 14)",
+            "ok": true,
+            "images": 83839,
+            "error": ""
         },
         {
-            "probe": "minimal fields, no date filter",
-            "ok": false,
-            "images": 0,
-            "error": "Failed to fetch data from Mapillary API: 500 Server Error: Internal Server Error for url: https://graph.mapillary.com/images?bbox=-49.2833%2C-25.4384%2C-49.2633%2C-25.4184&limit=10&access_token=***&fields=id%2Ccaptured_at%2Csequence%2Cthumb_1024_url (Please reduce the amount of data you're asking for, then retry your request)"
-        },
-        {
-            "probe": "id only, no date filter",
+            "probe": "/images bbox search, ±0.01°, fields=id, limit=10",
             "ok": false,
             "images": 0,
             "error": "Failed to fetch data from Mapillary API: 500 Server Error: Internal Server Error for url: https://graph.mapillary.com/images?bbox=-49.2833%2C-25.4384%2C-49.2633%2C-25.4184&limit=10&access_token=***&fields=id (Please reduce the amount of data you're asking for, then retry your request)"
+        },
+        {
+            "probe": "/images bbox search, ±0.001°, fields=id, limit=10",
+            "ok": true,
+            "images": 8,
+            "error": ""
+        },
+        {
+            "probe": "/images bbox search, ±0.001°, with start/end_captured_at",
+            "ok": true,
+            "images": 10,
+            "error": ""
         }
     ],
-    "cells": 0,
-    "cells_with_images": 0,
-    "images_sampled": 0,
+    "cells": 352,
+    "cells_with_images": 291,
+    "images_sampled": 865,
     "requests_failed": 0,
-    "images_with_detections": 0,
-    "images_with_surface_classes": 0,
+    "images_with_detections": 720,
+    "images_with_surface_classes": 542,
     "decode_failures": 0,
-    "latest_detection_created_at": null,
-    "sky_above_road": {},
-    "by_epoch": {},
-    "by_continent": {}
+    "latest_detection_created_at": "2026-09-17",
+    "sky_above_road": {
+        "True": 451
+    },
+    "by_epoch": {
+        "2014-2015": {
+            "Images": 72,
+            "Failed requests": 0,
+            "% with detections": 73.6,
+            "% with full-scene classes": 29.2,
+            "Median classes": 2.0,
+            "Latest detection created_at": "2025-08-19"
+        },
+        "2016-2017": {
+            "Images": 89,
+            "Failed requests": 0,
+            "% with detections": 70.8,
+            "% with full-scene classes": 25.8,
+            "Median classes": 2.0,
+            "Latest detection created_at": "2024-05-27"
+        },
+        "2018": {
+            "Images": 96,
+            "Failed requests": 0,
+            "% with detections": 63.5,
+            "% with full-scene classes": 19.8,
+            "Median classes": 1.0,
+            "Latest detection created_at": "2024-05-26"
+        },
+        "2019": {
+            "Images": 86,
+            "Failed requests": 0,
+            "% with detections": 74.4,
+            "% with full-scene classes": 31.4,
+            "Median classes": 2.0,
+            "Latest detection created_at": "2024-05-26"
+        },
+        "2020": {
+            "Images": 66,
+            "Failed requests": 0,
+            "% with detections": 68.2,
+            "% with full-scene classes": 28.8,
+            "Median classes": 2.0,
+            "Latest detection created_at": "2024-05-18"
+        },
+        "2021": {
+            "Images": 69,
+            "Failed requests": 0,
+            "% with detections": 68.1,
+            "% with full-scene classes": 66.7,
+            "Median classes": 18.0,
+            "Latest detection created_at": "2024-05-18"
+        },
+        "2022": {
+            "Images": 72,
+            "Failed requests": 0,
+            "% with detections": 100.0,
+            "% with full-scene classes": 100.0,
+            "Median classes": 21.5,
+            "Latest detection created_at": "2024-06-16"
+        },
+        "2023": {
+            "Images": 76,
+            "Failed requests": 0,
+            "% with detections": 100.0,
+            "% with full-scene classes": 100.0,
+            "Median classes": 22.5,
+            "Latest detection created_at": "2025-05-29"
+        },
+        "2024": {
+            "Images": 84,
+            "Failed requests": 0,
+            "% with detections": 100.0,
+            "% with full-scene classes": 100.0,
+            "Median classes": 21.0,
+            "Latest detection created_at": "2025-01-03"
+        },
+        "2025": {
+            "Images": 85,
+            "Failed requests": 0,
+            "% with detections": 100.0,
+            "% with full-scene classes": 100.0,
+            "Median classes": 22.0,
+            "Latest detection created_at": "2026-06-23"
+        },
+        "2026": {
+            "Images": 70,
+            "Failed requests": 0,
+            "% with detections": 100.0,
+            "% with full-scene classes": 100.0,
+            "Median classes": 21.5,
+            "Latest detection created_at": "2026-09-17"
+        }
+    },
+    "by_continent": {
+        "South America": {
+            "Images": 135,
+            "Failed requests": 0,
+            "% with detections": 86.7,
+            "% with full-scene classes": 59.3,
+            "Median classes": 10.0,
+            "Latest detection created_at": "2026-08-24"
+        },
+        "North America": {
+            "Images": 124,
+            "Failed requests": 0,
+            "% with detections": 92.7,
+            "% with full-scene classes": 87.9,
+            "Median classes": 24.0,
+            "Latest detection created_at": "2026-09-06"
+        },
+        "Europe": {
+            "Images": 253,
+            "Failed requests": 0,
+            "% with detections": 85.0,
+            "% with full-scene classes": 64.0,
+            "Median classes": 15.0,
+            "Latest detection created_at": "2026-09-17"
+        },
+        "Africa": {
+            "Images": 80,
+            "Failed requests": 0,
+            "% with detections": 75.0,
+            "% with full-scene classes": 43.8,
+            "Median classes": 3.0,
+            "Latest detection created_at": "2026-02-22"
+        },
+        "Asia": {
+            "Images": 207,
+            "Failed requests": 0,
+            "% with detections": 78.3,
+            "% with full-scene classes": 58.5,
+            "Median classes": 12.0,
+            "Latest detection created_at": "2026-08-12"
+        },
+        "Oceania": {
+            "Images": 66,
+            "Failed requests": 0,
+            "% with detections": 77.3,
+            "% with full-scene classes": 53.0,
+            "Median classes": 8.0,
+            "Latest detection created_at": "2026-07-10"
+        }
+    }
 }
