@@ -144,7 +144,8 @@ class FakeResponse:
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.exceptions.HTTPError(
-                f"{self.status_code} Error for url: https://graph.mapillary.com/1?access_token={requests.utils.quote(TOKEN, safe='')}"
+                f"{self.status_code} Error for url: https://graph.mapillary.com/1?access_token={requests.utils.quote(TOKEN, safe='')}",
+                response=self,
             )
 
 

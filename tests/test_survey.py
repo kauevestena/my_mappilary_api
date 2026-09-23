@@ -32,6 +32,8 @@ def fake_get(url, params=None, timeout=None):
     if url.startswith("https://thumbs.example"):
         return FakeThumb()
     if url.endswith("/images"):
+        if "start_captured_at" not in params:
+            return FakeResponse({"data": [{"id": "probe"}]})  # preflight probe
         if params["start_captured_at"].startswith("2014"):
             return FakeResponse({"data": []})  # no imagery in this epoch
         year = params["start_captured_at"][:4]
@@ -91,3 +93,56 @@ def test_survey_end_to_end(tmp_path, monkeypatch):
             for name in files:
                 with open(os.path.join(root, name), "rb") as f:
                     assert b"secret" not in f.read()
+
+
+def fake_get_without_date_filters(url, params=None, timeout=None):
+    """Fake API that fails on date filters (HTTP 500) and on the 'sequence' field."""
+    if url.endswith("/images"):
+        if "start_captured_at" in params:
+            return FakeResponse({"error": {"message": "An unknown error has occurred", "code": 1}}, 500)
+        if "is_pano" in params["fields"]:
+            return FakeResponse({"error": {"message": "Unknown field"}}, 500)
+        place = zlib.crc32(params["bbox"].encode()) % 1000
+        # one image per year, 2014 to 2021 (captured_at in epoch milliseconds, mid-year)
+        return FakeResponse(
+            {
+                "data": [
+                    {"id": f"{place:03d}{year}", "captured_at": int((year - 1970) * 365.25 * 86400000 + 180 * 86400000), "sequence": f"s{year}", "thumb_1024_url": "https://thumbs.example/x.jpg"}
+                    for year in range(2014, 2022)
+                ]
+            }
+        )
+    return fake_get(url, params, timeout)
+
+
+def test_survey_falls_back_to_client_side_epochs(tmp_path, monkeypatch):
+    monkeypatch.setattr(survey.mly.requests, "get", fake_get_without_date_filters)
+    monkeypatch.setattr(survey, "sleep", lambda s: None)
+    out = str(tmp_path / "survey")
+
+    summary = survey.run_survey(
+        out, "", per_cell=2, seed=1, max_samples=0,
+        locations=survey.LOCATIONS[:2], epochs=survey.EPOCHS, token=TOKEN, pause=0,
+    )
+
+    assert summary["search_strategy"].startswith("client-side")
+    assert [p["ok"] for p in summary["api_probes"]] == [False, True, False, False]
+    assert "Unknown field" in summary["api_probes"][0]["error"]
+
+    cells = pd.read_csv(os.path.join(out, "cells.csv"), keep_default_na=False)
+    found = dict(zip(cells[cells["location"] == "Curitiba"]["epoch"], cells[cells["location"] == "Curitiba"]["images_found"]))
+    assert found["2014-2015"] == 2 and found["2016-2017"] == 2 and found["2021"] == 1 and found["2022"] == 0
+    # 2019 images get no detections from fake_get (IDs starting with 2016/2018 are special there, not these)
+    assert summary["images_sampled"] == 2 * (2 + 2 + 1 + 1 + 1 + 1)
+    report = open(os.path.join(out, "SEGMENTATION_AVAILABILITY.md"), encoding="utf-8").read()
+    assert "## API probes" in report and "client-side" in report
+
+
+def test_survey_aborts_when_every_search_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(survey.mly.requests, "get", lambda *a, **k: FakeResponse({"error": {"message": "boom"}}, 500))
+    summary = survey.run_survey(
+        str(tmp_path), "", per_cell=2, seed=1, max_samples=0,
+        locations=survey.LOCATIONS[:2], epochs=survey.EPOCHS, token=TOKEN, pause=0,
+    )
+    assert summary["search_strategy"].startswith("none")
+    assert summary["images_sampled"] == 0 and len(summary["api_probes"]) == 3

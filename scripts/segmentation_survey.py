@@ -108,25 +108,103 @@ def pick_images(images, k, rng):
     return picked
 
 
-def search_images(lon, lat, start, end, token):
+# field sets tried by the preflight probes, in order of preference
+MINIMAL_FIELDS = ["id", "captured_at", "sequence", "thumb_1024_url"]
+FIELD_SETS = [("survey fields", IMAGE_FIELDS), ("minimal fields", MINIMAL_FIELDS), ("id only", ["id"])]
+
+# formats of the start/end_captured_at filters tried by the preflight probes
+DATE_FORMATS = {
+    "ISO 8601 datetime": lambda d: f"{d}T00:00:00Z",
+    "date only": lambda d: d,
+}
+
+# location and date range of the preflight probes
+PROBE_LOCATION = LOCATIONS[0]
+PROBE_RANGE = ("2016-01-01", "2026-01-01")
+
+
+def query_images(lon, lat, radius, token, fields, limit, start=None, end=None, retries=1):
+    """Search images in a bbox around a location, retrying once on failure."""
+    for attempt in range(retries + 1):
+        try:
+            data = mly.get_mapillary_images_metadata(
+                round(lon - radius, 6),
+                round(lat - radius, 6),
+                round(lon + radius, 6),
+                round(lat + radius, 6),
+                fields=fields,
+                token=token,
+                limit=limit,
+                timeout=120,
+                start_captured_at=start,
+                end_captured_at=end,
+            )
+            return data.get("data", [])
+        except (requests.exceptions.RequestException, ValueError):
+            if attempt == retries:
+                raise
+            sleep(5)
+
+
+def run_probes(token):
+    """
+    Try a few small image searches to find which fields and date filter
+    formats the API accepts. Returns (probes, fields, date_format), where
+    fields is None if no search works and date_format is None if the server
+    rejects every date filter format.
+    """
+    _, _, lon, lat = PROBE_LOCATION
+    probes, fields, date_format = [], None, None
+
+    def probe(label, probe_fields, fmt=None):
+        start = DATE_FORMATS[fmt](PROBE_RANGE[0]) if fmt else None
+        end = DATE_FORMATS[fmt](PROBE_RANGE[1]) if fmt else None
+        result = {"probe": label, "ok": False, "images": 0, "error": ""}
+        try:
+            result["images"] = len(query_images(lon, lat, 0.01, token, probe_fields, 10, start, end, retries=0))
+            result["ok"] = True
+        except Exception as e:
+            result["error"] = mly.redact_token(e, token)[:400]
+        probes.append(result)
+        print(f"probe: {label}: {'ok, ' + str(result['images']) + ' images' if result['ok'] else result['error']}", flush=True)
+        return result["ok"]
+
+    for label, probe_fields in FIELD_SETS:
+        if probe(f"{label}, no date filter", probe_fields):
+            fields = probe_fields
+            break
+
+    if fields is not None:
+        for fmt in DATE_FORMATS:
+            if probe(f"{', '.join(fields)} + date filter ({fmt})", fields, fmt):
+                date_format = fmt
+                break
+
+    return probes, fields, date_format
+
+
+def search_images_by_date(lon, lat, start, end, token, fields, date_format):
     """Search images captured in [start, end) around a location, widening the bbox if needed."""
+    to_param = DATE_FORMATS[date_format]
     for radius in SEARCH_RADII:
-        data = mly.get_mapillary_images_metadata(
-            round(lon - radius, 6),
-            round(lat - radius, 6),
-            round(lon + radius, 6),
-            round(lat + radius, 6),
-            fields=IMAGE_FIELDS,
-            token=token,
-            limit=100,
-            timeout=120,
-            start_captured_at=f"{start}T00:00:00Z",
-            end_captured_at=f"{end}T00:00:00Z",
-        )
-        images = data.get("data", [])
+        images = query_images(lon, lat, radius, token, fields, 100, to_param(start), to_param(end))
         if images:
             return images, radius
     return [], SEARCH_RADII[-1]
+
+
+def search_images_all_dates(lon, lat, token, fields):
+    """Search images of every date around a location (for client-side epoch filtering)."""
+    for radius in SEARCH_RADII:
+        images = query_images(lon, lat, radius, token, fields, 2000)
+        if images:
+            return images, radius
+    return [], SEARCH_RADII[-1]
+
+
+def in_epoch(image, start, end):
+    captured = iso_date(image.get("captured_at"))
+    return captured is not None and start <= captured < end
 
 
 def orientation_check(gdf):
@@ -241,7 +319,7 @@ def availability_table(df, by):
     return df.groupby(by, sort=False, observed=True)[list(df.columns)].apply(stats)
 
 
-def write_report(df, cells, samples, out, started, finished):
+def write_report(df, cells, samples, out, started, finished, probes=(), strategy=""):
     ok = df[df["error"] == ""]
     epoch_order = [e[0] for e in EPOCHS]
 
@@ -249,12 +327,16 @@ def write_report(df, cells, samples, out, started, finished):
     by_continent = availability_table(df, "continent")
 
     epochs_run = [e for e in epoch_order if e in set(cells["epoch"])]
-    matrix = (
-        ok.assign(avail=ok["n_detections"] > 0)
-        .pivot_table(index="location", columns="epoch", values="avail", aggfunc="mean")
-        .reindex(index=list(dict.fromkeys(cells["location"])), columns=epochs_run)
-        .map(lambda v: None if pd.isna(v) else f"{round(100 * v)}%")
-    )
+    locations_run = list(dict.fromkeys(cells["location"]))
+    if ok.empty:
+        matrix = pd.DataFrame(None, index=locations_run, columns=epochs_run, dtype=object)
+    else:
+        matrix = (
+            ok.assign(avail=ok["n_detections"] > 0)
+            .pivot_table(index="location", columns="epoch", values="avail", aggfunc="mean")
+            .reindex(index=locations_run, columns=epochs_run)
+            .map(lambda v: None if pd.isna(v) else f"{round(100 * v)}%")
+        )
     # distinguish cells without imagery from cells whose requests failed
     for cell in cells.itertuples():
         if matrix.at[cell.location, cell.epoch] is None:
@@ -269,6 +351,8 @@ def write_report(df, cells, samples, out, started, finished):
     summary = {
         "started": started,
         "finished": finished,
+        "search_strategy": strategy,
+        "api_probes": list(probes),
         "cells": len(cells),
         "cells_with_images": int((cells["images_found"] > 0).sum()),
         "images_sampled": int(len(df)),
@@ -311,6 +395,12 @@ def write_report(df, cells, samples, out, started, finished):
         f"- Geometry decode failures: {summary['decode_failures']}",
         f"- Newest detection created_at: {summary['latest_detection_created_at']}",
         f"- Orientation check (sky centroid above road centroid): {summary['sky_above_road'] or 'not testable'}",
+        "",
+        "## API probes",
+        "",
+        f"Search strategy: **{strategy}**",
+        "",
+        pd.DataFrame(list(probes), columns=["probe", "ok", "images", "error"]).to_markdown(index=False) if probes else "_No probes._",
         "",
         "## By capture epoch",
         "",
@@ -362,17 +452,43 @@ def run_survey(out, raw_out, per_cell, seed, max_samples, locations, epochs, tok
     records, cells = [], []
     candidates = {}  # epoch -> list of (image, detections, record) with full-scene classes
 
+    probes, fields, date_format = run_probes(token)
+    if fields is None:
+        strategy = "none: every image search failed, see the API probes"
+        locations = []
+    elif date_format:
+        strategy = f"server-side date filter ({date_format}), fields: {', '.join(fields)}"
+    elif "captured_at" in fields:
+        strategy = f"client-side epoch filtering of up to 2000 images per location (the API rejected date filters), fields: {', '.join(fields)}"
+    else:
+        strategy = "none: date filters fail and captured_at cannot be requested"
+        locations = []
+    print(f"search strategy: {strategy}", flush=True)
+
     for name, continent, lon, lat in locations:
+        location_images, location_radius, location_error = [], None, ""
+        if not date_format:
+            try:
+                location_images, location_radius = search_images_all_dates(lon, lat, token, fields)
+            except Exception as e:
+                location_error = mly.redact_token(e, token)[:300]
+
         for label, start, end in epochs:
             cell = {"location": name, "continent": continent, "epoch": label, "images_found": 0, "radius": None, "error": ""}
             try:
-                images, radius = search_images(lon, lat, start, end, token)
+                if date_format:
+                    images, radius = search_images_by_date(lon, lat, start, end, token, fields, date_format)
+                else:
+                    if location_error:
+                        raise RuntimeError(location_error)
+                    images = [i for i in location_images if in_epoch(i, start, end)]
+                    radius = location_radius
                 cell.update(images_found=len(images), radius=radius)
             except Exception as e:
                 cell["error"] = mly.redact_token(e, token)[:300]
                 images = []
             cells.append(cell)
-            print(f"{name:14s} {label:9s} images={cell['images_found']:3d} {cell['error'][:80]}", flush=True)
+            print(f"{name:14s} {label:9s} images={cell['images_found']:3d} {cell['error'][:200]}", flush=True)
 
             for image in pick_images(images, per_cell, rng):
                 record, detections = analyze_image(image, token, raw_out)
@@ -417,7 +533,7 @@ def run_survey(out, raw_out, per_cell, seed, max_samples, locations, epochs, tok
                     print(f"⚠️  Could not render sample {record['image_id']}: {mly.redact_token(e, token)}")
 
     finished = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
-    return write_report(df, cells, samples, out, started, finished)
+    return write_report(df, cells, samples, out, started, finished, probes, strategy)
 
 
 def main(argv=None):
