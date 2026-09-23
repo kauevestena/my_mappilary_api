@@ -1,15 +1,6 @@
 name: Segmentation Availability Survey
 
 on:
-  # Run when the survey or the library changes on the feature branch
-  push:
-    branches: [ claude/admiring-dirac-s7l1iw ]
-    paths:
-      - mapillary_api.py
-      - scripts/segmentation_survey.py
-      - tests/**
-      - .github/workflows/segmentation-survey.yml
-
   # Allow manual triggering
   workflow_dispatch:
     inputs:

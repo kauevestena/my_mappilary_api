@@ -74,11 +74,36 @@ rgb = colorize_mask(mask, class_index)
 download_segmentation_masks_from_gdf(gdf, "masks", scale_factor=0.25)
 ```
 
-Not every image has detections, and availability depends on where and when the
-images were captured. See the
-[availability survey](survey/SEGMENTATION_AVAILABILITY.md), produced by
-[`scripts/segmentation_survey.py`](scripts/segmentation_survey.py) through the
-*Segmentation Availability Survey* GitHub Action.
+#### Availability (survey of September 2026)
+
+The feature is **not discontinued**: Mapillary still segments new uploads, and
+the newest detection found was created on 2026-09-17. The
+[availability survey](survey/SEGMENTATION_AVAILABILITY.md) sampled 865 images
+in 32 cities on every inhabited continent, captured from 2014 to 2026:
+
+| Capture epoch | Images with detections | Images with full-scene segmentation |
+|:--|--:|--:|
+| 2014 – 2020 | 64 – 74% | 15 – 24% |
+| 2021 | 68% | 67% |
+| 2022 – 2026 | 100% | 100% (median ~22 classes per image) |
+
+- Images captured since 2022 all have a full semantic segmentation (road,
+  sidewalk, building, sky, vegetation, vehicles, poles, signs, ...), usually
+  produced within days of the capture (median: 1 day).
+- Most older images only kept a few object, road-marking or traffic-sign
+  detections, created during the 2021 migration to API v4. Some of them
+  (about 1 in 5) were re-processed in 2023 – 2024 and have a full segmentation.
+- All 173,660 detection geometries decoded without errors, and the masks are
+  upright (the sky was above the road in all 451 testable images).
+- The `/images` bbox search refuses busy areas even for tiny requests
+  (`fields=id`, `limit=10`, a ±0.01° box: *"Please reduce the amount of data
+  you're asking for"*). Use small boxes (±0.001° works),
+  `tiled_mapillary_data_to_gdf`, or `get_coverage_tile_images`.
+
+The survey can be re-run with the *Segmentation Availability Survey* GitHub
+Action (manual trigger), which runs
+[`scripts/segmentation_survey.py`](scripts/segmentation_survey.py) and commits
+its report to [`survey/`](survey/).
 
 ### Interactive Examples
 
