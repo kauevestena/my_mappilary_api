@@ -1,6 +1,6 @@
 {
-    "started": "2026-09-23 15:05",
-    "finished": "2026-09-23 15:18",
+    "started": "2026-09-23 15:20",
+    "finished": "2026-09-23 15:29",
     "search_strategy": "all images of the zoom-14 coverage vector tile around each location, split into epochs by captured_at",
     "api_probes": [
         {
@@ -18,13 +18,13 @@
         {
             "probe": "/images bbox search, ±0.001°, fields=id, limit=10",
             "ok": true,
-            "images": 8,
+            "images": 10,
             "error": ""
         },
         {
             "probe": "/images bbox search, ±0.001°, with start/end_captured_at",
             "ok": true,
-            "images": 10,
+            "images": 7,
             "error": ""
         }
     ],
@@ -33,7 +33,7 @@
     "images_sampled": 865,
     "requests_failed": 0,
     "images_with_detections": 720,
-    "images_with_surface_classes": 542,
+    "images_with_surface_classes": 513,
     "decode_failures": 0,
     "latest_detection_created_at": "2026-09-17",
     "sky_above_road": {
@@ -44,7 +44,7 @@
             "Images": 72,
             "Failed requests": 0,
             "% with detections": 73.6,
-            "% with full-scene classes": 29.2,
+            "% with full-scene classes": 23.6,
             "Median classes": 2.0,
             "Latest detection created_at": "2025-08-19"
         },
@@ -52,7 +52,7 @@
             "Images": 89,
             "Failed requests": 0,
             "% with detections": 70.8,
-            "% with full-scene classes": 25.8,
+            "% with full-scene classes": 20.2,
             "Median classes": 2.0,
             "Latest detection created_at": "2024-05-27"
         },
@@ -60,7 +60,7 @@
             "Images": 96,
             "Failed requests": 0,
             "% with detections": 63.5,
-            "% with full-scene classes": 19.8,
+            "% with full-scene classes": 14.6,
             "Median classes": 1.0,
             "Latest detection created_at": "2024-05-26"
         },
@@ -68,7 +68,7 @@
             "Images": 86,
             "Failed requests": 0,
             "% with detections": 74.4,
-            "% with full-scene classes": 31.4,
+            "% with full-scene classes": 19.8,
             "Median classes": 2.0,
             "Latest detection created_at": "2024-05-26"
         },
@@ -76,7 +76,7 @@
             "Images": 66,
             "Failed requests": 0,
             "% with detections": 68.2,
-            "% with full-scene classes": 28.8,
+            "% with full-scene classes": 21.2,
             "Median classes": 2.0,
             "Latest detection created_at": "2024-05-18"
         },
@@ -134,7 +134,7 @@
             "Images": 135,
             "Failed requests": 0,
             "% with detections": 86.7,
-            "% with full-scene classes": 59.3,
+            "% with full-scene classes": 51.9,
             "Median classes": 10.0,
             "Latest detection created_at": "2026-08-24"
         },
@@ -142,7 +142,7 @@
             "Images": 124,
             "Failed requests": 0,
             "% with detections": 92.7,
-            "% with full-scene classes": 87.9,
+            "% with full-scene classes": 85.5,
             "Median classes": 24.0,
             "Latest detection created_at": "2026-09-06"
         },
@@ -150,7 +150,7 @@
             "Images": 253,
             "Failed requests": 0,
             "% with detections": 85.0,
-            "% with full-scene classes": 64.0,
+            "% with full-scene classes": 61.3,
             "Median classes": 15.0,
             "Latest detection created_at": "2026-09-17"
         },
@@ -166,7 +166,7 @@
             "Images": 207,
             "Failed requests": 0,
             "% with detections": 78.3,
-            "% with full-scene classes": 58.5,
+            "% with full-scene classes": 55.6,
             "Median classes": 12.0,
             "Latest detection created_at": "2026-08-12"
         },
@@ -174,7 +174,7 @@
             "Images": 66,
             "Failed requests": 0,
             "% with detections": 77.3,
-            "% with full-scene classes": 53.0,
+            "% with full-scene classes": 48.5,
             "Median classes": 8.0,
             "Latest detection created_at": "2026-07-10"
         }
