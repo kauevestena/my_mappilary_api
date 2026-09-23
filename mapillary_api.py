@@ -642,6 +642,86 @@ def filter_metadata_with_polygon(data, polygon, anti_rounding_factor=1000000):
 
 
 # ---------------------------------------------------------------------------
+# Coverage vector tiles
+# ---------------------------------------------------------------------------
+#
+# The /images bbox search refuses areas with many images ("Please reduce the
+# amount of data you're asking for"). The coverage vector tiles list every
+# image of a zoom-14 tile (~2.4 km) with its capture date instead.
+
+COVERAGE_TILES_URL = "https://tiles.mapillary.com/maps/vtp/mly1_public/2/{z}/{x}/{y}"
+IMAGES_TILE_ZOOM = 14
+
+
+def get_coverage_tile_images(tile, token=MAPPILARY_TOKEN, timeout=120):
+    """
+    Get the images of a Mapillary coverage vector tile ('image' layer).
+
+    Parameters:
+        tile (mercantile.Tile): The tile, at zoom 14 (the only zoom level
+            with the image layer), e.g. mercantile.tile(lon, lat, 14).
+        token (str): The Mapillary API token.
+        timeout (int, optional): Request timeout in seconds.
+
+    Returns:
+        list: Image dictionaries shaped like the /images API data (so that
+            mapillary_data_to_gdf({"data": images}) works), with the tile's
+            properties: id, captured_at (epoch milliseconds), sequence_id,
+            is_pano, compass_angle, creator_id, organization_id.
+
+    Raises:
+        requests.exceptions.RequestException: For network-related errors
+        ValueError: For a missing token or an undecodable tile
+    """
+    if not token:
+        raise ValueError(
+            "No valid Mapillary API token provided. Please set API_TOKEN environment variable or create a mapillary_token file."
+        )
+
+    url = COVERAGE_TILES_URL.format(z=tile.z, x=tile.x, y=tile.y)
+    try:
+        response = requests.get(url, params={"access_token": token}, timeout=timeout)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        raise requests.exceptions.RequestException(
+            f"Failed to fetch coverage tile from Mapillary: {redact_token(e, token)}"
+        )
+
+    data = response.content
+    if not data:
+        return []
+    try:
+        if data[:2] == b"\x1f\x8b":
+            data = zlib.decompress(data, 16 + zlib.MAX_WBITS)
+        decoded = mapbox_vector_tile.decode(data, default_options={"y_coord_down": True})
+    except Exception as e:
+        raise ValueError(f"Cannot decode coverage tile {tuple(tile)}: {e}")
+
+    layer = decoded.get("image")
+    if not layer:
+        return []
+
+    # tile pixel coordinates -> web mercator -> lon/lat
+    extent = layer.get("extent", 4096)
+    left, bottom, right, top = mercantile.xy_bounds(tile)
+
+    images = []
+    for feature in layer.get("features", []):
+        if feature["geometry"]["type"] != "Point":
+            continue
+        px, py = feature["geometry"]["coordinates"]
+        lon, lat = mercantile.lnglat(
+            left + (right - left) * px / extent, top - (top - bottom) * py / extent
+        )
+        image = dict(feature.get("properties", {}))
+        image.setdefault("id", feature.get("id"))
+        image["geometry"] = {"type": "Point", "coordinates": [lon, lat]}
+        images.append(image)
+
+    return images
+
+
+# ---------------------------------------------------------------------------
 # Semantic segmentation (detections)
 # ---------------------------------------------------------------------------
 #

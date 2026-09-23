@@ -216,3 +216,66 @@ def test_download_segmentation_masks_from_gdf(tmp_path, monkeypatch):
     assert (tmp_path / "full_detections.json").exists() and (tmp_path / "full_mask_color.png").exists()
     assert np.array(Image.open(tmp_path / "nosize_mask.png")).shape == (30, 40)
     assert not (tmp_path / "empty_mask.png").exists()
+
+
+class FakeTileResponse:
+    def __init__(self, content, status_code=200):
+        self.content = content
+        self.status_code = status_code
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            raise requests.exceptions.HTTPError(f"{self.status_code} Error for url: x?access_token={TOKEN}")
+
+
+def encode_coverage_tile(images):
+    """Encode (px, py, properties) tuples as the 'image' layer of a coverage tile."""
+    from shapely.geometry import Point
+
+    return mapbox_vector_tile.encode(
+        [{"name": "image", "features": [{"geometry": Point(px, py).wkt, "properties": props} for px, py, props in images]}],
+        default_options={"y_coord_down": True, "extents": EXTENT},
+    )
+
+
+def test_get_coverage_tile_images(monkeypatch):
+    import gzip
+    import mercantile
+
+    tile = mercantile.tile(-49.2733, -25.4284, 14)
+    content = encode_coverage_tile(
+        [
+            (0, 0, {"id": 1, "captured_at": 1600000000000, "sequence_id": "a"}),
+            (EXTENT // 2, EXTENT // 2, {"id": 2, "captured_at": 1400000000000, "sequence_id": "b"}),
+        ]
+    )
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append((url, params))
+        return FakeTileResponse(gzip.compress(content))
+
+    monkeypatch.setattr(mly.requests, "get", fake_get)
+    images = mly.get_coverage_tile_images(tile, token=TOKEN)
+
+    assert calls[0][0] == f"https://tiles.mapillary.com/maps/vtp/mly1_public/2/14/{tile.x}/{tile.y}"
+    assert [i["id"] for i in images] == [1, 2]
+    assert images[0]["captured_at"] == 1600000000000 and images[1]["sequence_id"] == "b"
+
+    # pixel (0, 0) is the north-west corner of the tile, the center maps to the mercator center
+    bounds = mercantile.bounds(tile)
+    assert images[0]["geometry"]["coordinates"] == pytest.approx([bounds.west, bounds.north])
+    left, bottom, right, top = mercantile.xy_bounds(tile)
+    center = mercantile.lnglat((left + right) / 2, (bottom + top) / 2)
+    assert images[1]["geometry"]["coordinates"] == pytest.approx([center.lng, center.lat])
+
+    gdf = mly.mapillary_data_to_gdf({"data": images})
+    assert len(gdf) == 2 and gdf.crs == "EPSG:4326"
+
+    monkeypatch.setattr(mly.requests, "get", lambda *a, **k: FakeTileResponse(b""))
+    assert mly.get_coverage_tile_images(tile, token=TOKEN) == []
+
+    monkeypatch.setattr(mly.requests, "get", lambda *a, **k: FakeTileResponse(b"", 500))
+    with pytest.raises(requests.exceptions.RequestException) as excinfo:
+        mly.get_coverage_tile_images(tile, token=TOKEN)
+    assert "secret" not in str(excinfo.value)

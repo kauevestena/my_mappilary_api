@@ -100,6 +100,7 @@ The examples notebook is automatically updated via GitHub Actions to ensure fres
 - `get_territory_polygon(place_name, ...)` - Get polygon for a named place
 - `tiled_mapillary_data_to_gdf(polygon, ...)` - Query large areas using tiles
 - `download_all_pictures_from_gdf(gdf, folder, ...)` - Download actual images
+- `get_coverage_tile_images(tile, ...)` - List every image of a zoom-14 coverage vector tile (with capture dates), for areas where the bbox search refuses to answer
 
 ### Semantic Segmentation Functions
 

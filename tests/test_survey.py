@@ -1,11 +1,12 @@
 """
-Offline end-to-end test of scripts/segmentation_survey.py against a fake API.
+Offline end-to-end tests of scripts/segmentation_survey.py against a fake API.
 """
 
 import io
-import zlib
 import os
+import re
 import sys
+from datetime import datetime, timezone
 
 import pandas as pd
 from PIL import Image
@@ -15,7 +16,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 sys.path.insert(0, os.path.dirname(__file__))
 
 import segmentation_survey as survey  # noqa: E402
-from test_segmentation import EXTENT, FakeResponse, TOKEN, detection  # noqa: E402
+from test_segmentation import (  # noqa: E402
+    EXTENT, TOKEN, FakeResponse, FakeTileResponse, detection, encode_coverage_tile,
+)
+
+YEARS = range(2014, 2022)  # one image per year and location in the fake coverage tiles
 
 
 class FakeThumb:
@@ -28,24 +33,26 @@ class FakeThumb:
         pass
 
 
+def mid_year_ms(year):
+    return int(datetime(year, 7, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+
 def fake_get(url, params=None, timeout=None):
     if url.startswith("https://thumbs.example"):
         return FakeThumb()
-    if url.endswith("/images"):
-        if "start_captured_at" not in params:
-            return FakeResponse({"data": [{"id": "probe"}]})  # preflight probe
-        if params["start_captured_at"].startswith("2014"):
-            return FakeResponse({"data": []})  # no imagery in this epoch
-        year = params["start_captured_at"][:4]
-        place = zlib.crc32(params["bbox"].encode()) % 1000  # unique image IDs per location
-        return FakeResponse(
-            {
-                "data": [
-                    {"id": f"{year}{place:03d}{i}", "captured_at": 1600000000000, "sequence": f"s{i}", "width": 64, "height": 48, "thumb_1024_url": "https://thumbs.example/x.jpg"}
-                    for i in range(5)
-                ]
-            }
+    if url.startswith("https://tiles.mapillary.com"):
+        x = url.split("/")[-2]
+        return FakeTileResponse(
+            encode_coverage_tile(
+                [(100 * i, 100 * i, {"id": int(f"{year}{x}"), "captured_at": mid_year_ms(year), "sequence_id": str(year)})
+                 for i, year in enumerate(YEARS)]
+            )
         )
+    if url.endswith("/images"):
+        minx, _, maxx, _ = map(float, params["bbox"].split(","))
+        if maxx - minx > 0.01:
+            return FakeResponse({"error": {"message": "Please reduce the amount of data you're asking for, then retry your request"}}, 500)
+        return FakeResponse({"data": [{"id": "1"}]})
     if url.endswith("/detections"):
         image_id = url.split("/")[-2]
         if image_id.startswith("2016"):
@@ -60,6 +67,8 @@ def fake_get(url, params=None, timeout=None):
                 ]
             }
         )
+    if re.search(r"graph.mapillary.com/\d+$", url):
+        return FakeResponse({"thumb_1024_url": "https://thumbs.example/x.jpg", "id": url.split("/")[-1]})
     raise AssertionError(f"unexpected url {url}")
 
 
@@ -69,23 +78,29 @@ def test_survey_end_to_end(tmp_path, monkeypatch):
 
     summary = survey.run_survey(
         out, raw, per_cell=2, seed=1, max_samples=3,
-        locations=survey.LOCATIONS[:2],
-        epochs=[e for e in survey.EPOCHS if e[0] in ("2014-2015", "2016-2017", "2018", "2019")],
-        token=TOKEN, pause=0,
+        locations=survey.LOCATIONS[:2], epochs=survey.EPOCHS, token=TOKEN, pause=0,
     )
 
+    assert summary["search_strategy"].startswith("all images of the zoom-14 coverage vector tile")
+    assert [p["ok"] for p in summary["api_probes"]] == [True, False, True, True]
+    assert "reduce the amount of data" in summary["api_probes"][1]["error"]
+
+    cells = pd.read_csv(os.path.join(out, "cells.csv"), keep_default_na=False)
+    assert len(cells) == 2 * len(survey.EPOCHS)
+    found = dict(zip(cells["epoch"][:len(survey.EPOCHS)], cells["images_found"][:len(survey.EPOCHS)]))
+    assert found["2014-2015"] == 2 and found["2016-2017"] == 2 and found["2021"] == 1 and found["2022"] == 0
+
     df = pd.read_csv(os.path.join(out, "segmentation_availability.csv"), keep_default_na=False)
-    assert len(df) == 2 * 3 * 2  # 2 locations × 3 epochs with imagery × 2 images
-    assert summary["cells"] == 8 and summary["cells_with_images"] == 6
-    assert summary["requests_failed"] == 4
-    assert summary["images_with_detections"] == 4
-    assert summary["images_with_surface_classes"] == 4
-    assert summary["sky_above_road"] == {"True": 4}
+    assert len(df) == summary["images_sampled"] == 2 * (2 + 2 + 1 + 1 + 1 + 1)
+    assert summary["requests_failed"] == 2  # the 2018 images
+    assert summary["images_with_detections"] == summary["images_with_surface_classes"] == 2 * 6  # 2014, 2015, 2017, 2019, 2020, 2021
+    assert summary["sky_above_road"] == {"True": 12}
 
     report = open(os.path.join(out, "SEGMENTATION_AVAILABILITY.md"), encoding="utf-8").read()
-    assert "## By capture epoch" in report and "samples/" in report
+    for section in ("## API probes", "## By capture epoch", "## By continent", "samples/"):
+        assert section in report
     assert len(os.listdir(os.path.join(out, "samples"))) == 3
-    assert len(os.listdir(os.path.join(raw, "detections"))) == 4
+    assert len(os.listdir(os.path.join(raw, "detections"))) == 12
 
     # the token never reaches the outputs
     for folder in (out, raw):
@@ -95,54 +110,13 @@ def test_survey_end_to_end(tmp_path, monkeypatch):
                     assert b"secret" not in f.read()
 
 
-def fake_get_without_date_filters(url, params=None, timeout=None):
-    """Fake API that fails on date filters (HTTP 500) and on the 'sequence' field."""
-    if url.endswith("/images"):
-        if "start_captured_at" in params:
-            return FakeResponse({"error": {"message": "An unknown error has occurred", "code": 1}}, 500)
-        if "is_pano" in params["fields"]:
-            return FakeResponse({"error": {"message": "Unknown field"}}, 500)
-        place = zlib.crc32(params["bbox"].encode()) % 1000
-        # one image per year, 2014 to 2021 (captured_at in epoch milliseconds, mid-year)
-        return FakeResponse(
-            {
-                "data": [
-                    {"id": f"{place:03d}{year}", "captured_at": int((year - 1970) * 365.25 * 86400000 + 180 * 86400000), "sequence": f"s{year}", "thumb_1024_url": "https://thumbs.example/x.jpg"}
-                    for year in range(2014, 2022)
-                ]
-            }
-        )
-    return fake_get(url, params, timeout)
-
-
-def test_survey_falls_back_to_client_side_epochs(tmp_path, monkeypatch):
-    monkeypatch.setattr(survey.mly.requests, "get", fake_get_without_date_filters)
-    monkeypatch.setattr(survey, "sleep", lambda s: None)
-    out = str(tmp_path / "survey")
-
-    summary = survey.run_survey(
-        out, "", per_cell=2, seed=1, max_samples=0,
-        locations=survey.LOCATIONS[:2], epochs=survey.EPOCHS, token=TOKEN, pause=0,
-    )
-
-    assert summary["search_strategy"].startswith("client-side")
-    assert [p["ok"] for p in summary["api_probes"]] == [False, True, False, False]
-    assert "Unknown field" in summary["api_probes"][0]["error"]
-
-    cells = pd.read_csv(os.path.join(out, "cells.csv"), keep_default_na=False)
-    found = dict(zip(cells[cells["location"] == "Curitiba"]["epoch"], cells[cells["location"] == "Curitiba"]["images_found"]))
-    assert found["2014-2015"] == 2 and found["2016-2017"] == 2 and found["2021"] == 1 and found["2022"] == 0
-    # 2019 images get no detections from fake_get (IDs starting with 2016/2018 are special there, not these)
-    assert summary["images_sampled"] == 2 * (2 + 2 + 1 + 1 + 1 + 1)
-    report = open(os.path.join(out, "SEGMENTATION_AVAILABILITY.md"), encoding="utf-8").read()
-    assert "## API probes" in report and "client-side" in report
-
-
-def test_survey_aborts_when_every_search_fails(tmp_path, monkeypatch):
+def test_survey_aborts_when_tiles_fail(tmp_path, monkeypatch):
     monkeypatch.setattr(survey.mly.requests, "get", lambda *a, **k: FakeResponse({"error": {"message": "boom"}}, 500))
     summary = survey.run_survey(
         str(tmp_path), "", per_cell=2, seed=1, max_samples=0,
         locations=survey.LOCATIONS[:2], epochs=survey.EPOCHS, token=TOKEN, pause=0,
     )
     assert summary["search_strategy"].startswith("none")
-    assert summary["images_sampled"] == 0 and len(summary["api_probes"]) == 3
+    assert summary["images_sampled"] == 0 and len(summary["api_probes"]) == 4
+    report = open(os.path.join(tmp_path, "SEGMENTATION_AVAILABILITY.md"), encoding="utf-8").read()
+    assert "## By capture epoch\n\n_No data._" in report

@@ -24,6 +24,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from time import sleep
 
+import mercantile
 import numpy as np
 import pandas as pd
 import requests
@@ -74,10 +75,7 @@ EPOCHS = [("2014-2015", "2014-01-01", "2016-01-01"), ("2016-2017", "2016-01-01",
     (str(year), f"{year}-01-01", f"{year + 1}-01-01") for year in range(2018, 2027)
 ]
 
-IMAGE_FIELDS = ["id", "captured_at", "geometry", "width", "height", "is_pano", "sequence", "thumb_1024_url"]
 
-# bbox half-sizes (degrees) tried in order until images are found
-SEARCH_RADII = [0.01, 0.03]
 
 
 def iso_date(value):
@@ -95,9 +93,10 @@ def pick_images(images, k, rng):
     rng.shuffle(images)
     picked, seen = [], set()
     for image in images:
-        if image.get("sequence") not in seen:
+        sequence = image.get("sequence_id", image.get("sequence"))
+        if sequence not in seen:
             picked.append(image)
-            seen.add(image.get("sequence"))
+            seen.add(sequence)
         if len(picked) == k:
             return picked
     for image in images:
@@ -108,60 +107,22 @@ def pick_images(images, k, rng):
     return picked
 
 
-# field sets tried by the preflight probes, in order of preference
-MINIMAL_FIELDS = ["id", "captured_at", "sequence", "thumb_1024_url"]
-FIELD_SETS = [("survey fields", IMAGE_FIELDS), ("minimal fields", MINIMAL_FIELDS), ("id only", ["id"])]
-
-# formats of the start/end_captured_at filters tried by the preflight probes
-DATE_FORMATS = {
-    "ISO 8601 datetime": lambda d: f"{d}T00:00:00Z",
-    "date only": lambda d: d,
-}
-
-# location and date range of the preflight probes
+# location of the preflight probes
 PROBE_LOCATION = LOCATIONS[0]
-PROBE_RANGE = ("2016-01-01", "2026-01-01")
-
-
-def query_images(lon, lat, radius, token, fields, limit, start=None, end=None, retries=1):
-    """Search images in a bbox around a location, retrying once on failure."""
-    for attempt in range(retries + 1):
-        try:
-            data = mly.get_mapillary_images_metadata(
-                round(lon - radius, 6),
-                round(lat - radius, 6),
-                round(lon + radius, 6),
-                round(lat + radius, 6),
-                fields=fields,
-                token=token,
-                limit=limit,
-                timeout=120,
-                start_captured_at=start,
-                end_captured_at=end,
-            )
-            return data.get("data", [])
-        except (requests.exceptions.RequestException, ValueError):
-            if attempt == retries:
-                raise
-            sleep(5)
 
 
 def run_probes(token):
     """
-    Try a few small image searches to find which fields and date filter
-    formats the API accepts. Returns (probes, fields, date_format), where
-    fields is None if no search works and date_format is None if the server
-    rejects every date filter format.
+    Diagnose which ways of listing images the API currently accepts, near the
+    first location. Returns (probes, tiles_ok).
     """
     _, _, lon, lat = PROBE_LOCATION
-    probes, fields, date_format = [], None, None
+    probes = []
 
-    def probe(label, probe_fields, fmt=None):
-        start = DATE_FORMATS[fmt](PROBE_RANGE[0]) if fmt else None
-        end = DATE_FORMATS[fmt](PROBE_RANGE[1]) if fmt else None
+    def probe(label, call):
         result = {"probe": label, "ok": False, "images": 0, "error": ""}
         try:
-            result["images"] = len(query_images(lon, lat, 0.01, token, probe_fields, 10, start, end, retries=0))
+            result["images"] = len(call())
             result["ok"] = True
         except Exception as e:
             result["error"] = mly.redact_token(e, token)[:400]
@@ -169,37 +130,33 @@ def run_probes(token):
         print(f"probe: {label}: {'ok, ' + str(result['images']) + ' images' if result['ok'] else result['error']}", flush=True)
         return result["ok"]
 
-    for label, probe_fields in FIELD_SETS:
-        if probe(f"{label}, no date filter", probe_fields):
-            fields = probe_fields
-            break
+    def bbox_search(radius, **kwargs):
+        return mly.get_mapillary_images_metadata(
+            round(lon - radius, 6), round(lat - radius, 6), round(lon + radius, 6), round(lat + radius, 6),
+            fields=["id"], token=token, limit=10, timeout=120, **kwargs,
+        ).get("data", [])
 
-    if fields is not None:
-        for fmt in DATE_FORMATS:
-            if probe(f"{', '.join(fields)} + date filter ({fmt})", fields, fmt):
-                date_format = fmt
-                break
-
-    return probes, fields, date_format
-
-
-def search_images_by_date(lon, lat, start, end, token, fields, date_format):
-    """Search images captured in [start, end) around a location, widening the bbox if needed."""
-    to_param = DATE_FORMATS[date_format]
-    for radius in SEARCH_RADII:
-        images = query_images(lon, lat, radius, token, fields, 100, to_param(start), to_param(end))
-        if images:
-            return images, radius
-    return [], SEARCH_RADII[-1]
+    tiles_ok = probe(
+        f"coverage vector tile (zoom {mly.IMAGES_TILE_ZOOM})",
+        lambda: mly.get_coverage_tile_images(mercantile.tile(lon, lat, mly.IMAGES_TILE_ZOOM), token=token),
+    )
+    probe("/images bbox search, ±0.01°, fields=id, limit=10", lambda: bbox_search(0.01))
+    probe("/images bbox search, ±0.001°, fields=id, limit=10", lambda: bbox_search(0.001))
+    probe(
+        "/images bbox search, ±0.001°, with start/end_captured_at",
+        lambda: bbox_search(0.001, start_captured_at="2016-01-01T00:00:00Z", end_captured_at="2026-01-01T00:00:00Z"),
+    )
+    return probes, tiles_ok
 
 
-def search_images_all_dates(lon, lat, token, fields):
-    """Search images of every date around a location (for client-side epoch filtering)."""
-    for radius in SEARCH_RADII:
-        images = query_images(lon, lat, radius, token, fields, 2000)
-        if images:
-            return images, radius
-    return [], SEARCH_RADII[-1]
+def location_images(lon, lat, token):
+    """All images of the zoom-14 coverage tile containing a location (with retry)."""
+    tile = mercantile.tile(lon, lat, mly.IMAGES_TILE_ZOOM)
+    try:
+        return mly.get_coverage_tile_images(tile, token=token)
+    except Exception:
+        sleep(5)
+        return mly.get_coverage_tile_images(tile, token=token)
 
 
 def in_epoch(image, start, end):
@@ -275,7 +232,9 @@ def analyze_image(image, token, raw_out):
 
 def render_sample(image, detections, outpath, token):
     """Save the image thumbnail next to its colorized segmentation overlay."""
-    url = image.get("thumb_1024_url")
+    url = image.get("thumb_1024_url") or mly._graph_api_get(
+        f"{mly.GRAPH_API_URL}/{image['id']}", {"fields": "thumb_1024_url"}, token=token
+    ).get("thumb_1024_url")
     if not url:
         return False
     response = requests.get(url, timeout=60)
@@ -301,6 +260,8 @@ def percent(series):
 
 def availability_table(df, by):
     """Availability statistics grouped by a column. Percentages exclude failed requests."""
+    if df.empty:
+        return pd.DataFrame()
 
     def stats(group):
         ok = group[group["error"] == ""]
@@ -375,8 +336,9 @@ def write_report(df, cells, samples, out, started, finished, probes=(), strategy
         "",
         f"Run: {started} → {finished} (UTC). Generated by `scripts/segmentation_survey.py`.",
         "",
-        "For each location × capture epoch, up to a few images captured in that epoch were sampled near the "
-        "location (bbox ±0.01°, widened to ±0.03° when empty) and their detections were requested from "
+        "For each location, every image of the zoom-14 coverage vector tile (~2.4 km) containing it was listed "
+        "and split by capture epoch; in each location × epoch, up to a few images (preferring distinct "
+        "sequences) were sampled and their detections were requested from "
         "`https://graph.mapillary.com/{image_id}/detections`.",
         "",
         "- **% with detections**: images for which the API returned at least one detection.",
@@ -404,11 +366,11 @@ def write_report(df, cells, samples, out, started, finished, probes=(), strategy
         "",
         "## By capture epoch",
         "",
-        by_epoch.to_markdown(),
+        by_epoch.to_markdown() if not by_epoch.empty else "_No data._",
         "",
         "## By continent",
         "",
-        by_continent.to_markdown(),
+        by_continent.to_markdown() if not by_continent.empty else "_No data._",
         "",
         "## Detection processing year (newest detection per image)",
         "",
@@ -452,41 +414,24 @@ def run_survey(out, raw_out, per_cell, seed, max_samples, locations, epochs, tok
     records, cells = [], []
     candidates = {}  # epoch -> list of (image, detections, record) with full-scene classes
 
-    probes, fields, date_format = run_probes(token)
-    if fields is None:
-        strategy = "none: every image search failed, see the API probes"
-        locations = []
-    elif date_format:
-        strategy = f"server-side date filter ({date_format}), fields: {', '.join(fields)}"
-    elif "captured_at" in fields:
-        strategy = f"client-side epoch filtering of up to 2000 images per location (the API rejected date filters), fields: {', '.join(fields)}"
+    probes, tiles_ok = run_probes(token)
+    if tiles_ok:
+        strategy = f"all images of the zoom-{mly.IMAGES_TILE_ZOOM} coverage vector tile around each location, split into epochs by captured_at"
     else:
-        strategy = "none: date filters fail and captured_at cannot be requested"
+        strategy = "none: coverage vector tiles failed, see the API probes"
         locations = []
     print(f"search strategy: {strategy}", flush=True)
 
     for name, continent, lon, lat in locations:
-        location_images, location_radius, location_error = [], None, ""
-        if not date_format:
-            try:
-                location_images, location_radius = search_images_all_dates(lon, lat, token, fields)
-            except Exception as e:
-                location_error = mly.redact_token(e, token)[:300]
+        tile_images, tile_error = [], ""
+        try:
+            tile_images = location_images(lon, lat, token)
+        except Exception as e:
+            tile_error = mly.redact_token(e, token)[:300]
 
         for label, start, end in epochs:
-            cell = {"location": name, "continent": continent, "epoch": label, "images_found": 0, "radius": None, "error": ""}
-            try:
-                if date_format:
-                    images, radius = search_images_by_date(lon, lat, start, end, token, fields, date_format)
-                else:
-                    if location_error:
-                        raise RuntimeError(location_error)
-                    images = [i for i in location_images if in_epoch(i, start, end)]
-                    radius = location_radius
-                cell.update(images_found=len(images), radius=radius)
-            except Exception as e:
-                cell["error"] = mly.redact_token(e, token)[:300]
-                images = []
+            images = [i for i in tile_images if in_epoch(i, start, end)]
+            cell = {"location": name, "continent": continent, "epoch": label, "images_found": len(images), "tile_images": len(tile_images), "error": tile_error}
             cells.append(cell)
             print(f"{name:14s} {label:9s} images={cell['images_found']:3d} {cell['error'][:200]}", flush=True)
 
@@ -505,7 +450,7 @@ def run_survey(out, raw_out, per_cell, seed, max_samples, locations, epochs, tok
         df = pd.DataFrame(columns=columns + ["image_id", "n_detections", "n_classes", "has_surface", "detections_created_max", "decode_failures", "sky_above_road", "error"])
     df = df[columns + [c for c in df.columns if c not in columns]]
     df.to_csv(os.path.join(out, "segmentation_availability.csv"), index=False)
-    cells = pd.DataFrame(cells, columns=["location", "continent", "epoch", "images_found", "radius", "error"])
+    cells = pd.DataFrame(cells, columns=["location", "continent", "epoch", "images_found", "tile_images", "error"])
     cells.to_csv(os.path.join(out, "cells.csv"), index=False)
 
     # one sample per epoch first, then round-robin over the remaining candidates
