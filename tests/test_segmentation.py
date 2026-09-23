@@ -280,3 +280,115 @@ def test_get_coverage_tile_images(monkeypatch):
     with pytest.raises(requests.exceptions.RequestException) as excinfo:
         mly.get_coverage_tile_images(tile, token=TOKEN)
     assert "secret" not in str(excinfo.value)
+
+
+def test_detections_summary():
+    summary = mly.detections_summary(
+        [
+            detection("nature--sky", SKY),
+            detection("construction--flat--road", ROAD),
+            detection("object--vehicle--car", box(0, 0, 1024, 1024), box(2048, 2048, 3072, 3072)),  # 2 features
+            detection("object--vehicle--car", box(1024, 1024, 2048, 2048), id_="2"),  # same class again
+        ]
+    )
+    assert summary["present"] is True
+    assert summary["number_available_classes"] == 3
+    assert summary["class_percents"] == {
+        "nature--sky": 25.0,
+        "construction--flat--road": 25.0,
+        "object--vehicle--car": 18.75,
+    }
+    assert list(summary["class_percents"].values()) == sorted(summary["class_percents"].values(), reverse=True)
+
+    # holes are subtracted
+    hole = Polygon(
+        [(0, 0), (EXTENT, 0), (EXTENT, EXTENT), (0, EXTENT)],
+        [[(1024, 1024), (3072, 1024), (3072, 3072), (1024, 3072)]],
+    )
+    assert mly.detections_summary([detection("nature--vegetation", hole)])["class_percents"] == {"nature--vegetation": 75.0}
+
+    assert mly.detections_summary([]) == {"present": False, "number_available_classes": 0, "class_percents": {}}
+
+
+def test_detections_summary_matches_mask():
+    detections = [
+        detection("nature--sky", Polygon([(0, 0), (4096, 0), (4096, 900), (2000, 1400), (0, 1100)])),
+        detection("construction--flat--road", Polygon([(0, 4096), (4096, 4096), (2500, 2600), (1500, 2600)])),
+    ]
+    mask, classes = mly.detections_to_mask(detections, 256, 256)
+    percents = mly.detections_summary(detections)["class_percents"]
+    for value, label in classes.items():
+        assert percents[value] == pytest.approx(100 * (mask == label).mean(), abs=1)
+
+
+def test_add_detections_summary_builds_no_geometry(monkeypatch):
+    import geopandas as gpd
+    from shapely.geometry import Point
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("geometry objects must not be built")
+
+    for name in ("shape", "decode_detection_geometry", "detections_to_gdf", "detections_to_mask"):
+        monkeypatch.setattr(mly, name, forbidden)
+
+    calls = []
+
+    def fake_get(url, params=None, timeout=None):
+        calls.append(params)
+        if url.endswith("/empty/detections"):
+            return FakeResponse({"data": []})
+        if url.endswith("/broken/detections"):
+            return FakeResponse({"error": {"message": f"boom {TOKEN}"}}, 500)
+        return FakeResponse({"data": [detection("nature--sky", SKY), detection("construction--flat--road", ROAD)]})
+
+    monkeypatch.setattr(mly.requests, "get", fake_get)
+    points = [Point(-49.27, -25.43), Point(-49.26, -25.42), Point(-49.25, -25.41)]
+    gdf = gpd.GeoDataFrame({"id": ["full", "empty", "broken"]}, geometry=points, crs="EPSG:4326", index=[0, 0, 1])
+
+    result = mly.add_detections_summary(gdf, token=TOKEN)
+
+    assert result is gdf
+    assert list(gdf.geometry) == points  # photo locations are untouched
+    full, empty, broken = gdf["detections_summary"]
+    assert full == {
+        "present": True,
+        "number_available_classes": 2,
+        "class_percents": {"nature--sky": 25.0, "construction--flat--road": 25.0},
+    }
+    assert empty == {"present": False, "number_available_classes": 0, "class_percents": {}}
+    assert broken is None
+    assert all(p["fields"] == "value,geometry" for p in calls)
+
+
+def test_mapillary_data_to_gdf_with_detections_summary(tmp_path, monkeypatch):
+    import json
+
+    import geopandas as gpd
+
+    monkeypatch.setattr(
+        mly.requests, "get",
+        lambda url, params=None, timeout=None: FakeResponse({"data": [detection("nature--sky", SKY)]}),
+    )
+    data = {"data": [
+        {"id": "1", "geometry": {"type": "Point", "coordinates": [-49.27, -25.43]}},
+        {"id": "2", "geometry": {"type": "Point", "coordinates": [-49.26, -25.42]}},
+    ]}
+    for name in ("images.geojson", "images.gpkg"):
+        outpath = str(tmp_path / name)
+        gdf = mly.mapillary_data_to_gdf(data, outpath=outpath, detections_summary=True, token=TOKEN)
+
+        assert isinstance(gdf["detections_summary"].iloc[0], dict)  # real dicts in memory
+        assert gdf["detections_summary"].iloc[0]["class_percents"] == {"nature--sky": 25.0}
+
+        # saved as JSON text (the GeoJSON reader parses it back into a dict)
+        saved = gpd.read_file(outpath)["detections_summary"].iloc[1]
+        assert (json.loads(saved) if isinstance(saved, str) else saved) == gdf["detections_summary"].iloc[1]
+
+    # without the flag, no request is made and no column is added
+    monkeypatch.setattr(mly.requests, "get", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no request expected")))
+    assert "detections_summary" not in mly.mapillary_data_to_gdf(data).columns
+
+
+def test_detections_summary_uses_plain_floats():
+    percents = mly.detections_summary([detection("nature--sky", SKY)])["class_percents"]
+    assert type(percents["nature--sky"]) is float

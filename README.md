@@ -74,6 +74,25 @@ rgb = colorize_mask(mask, class_index)
 download_segmentation_masks_from_gdf(gdf, "masks", scale_factor=0.25)
 ```
 
+For a quick overview of many images, add a `detections_summary` column to the
+images GeoDataFrame (one dict per photo). It is computed directly from the
+encoded polygons, without building any geometry:
+
+```python
+gdf = mapillary_data_to_gdf(metadata, detections_summary=True)
+# or, for an existing images GeoDataFrame:
+gdf = add_detections_summary(gdf)
+
+gdf["detections_summary"].iloc[0]
+# {'present': True,
+#  'number_available_classes': 21,
+#  'class_percents': {'construction--flat--road': 31.2, 'nature--sky': 18.7, ...}}
+```
+
+`class_percents` gives the share of the image (in %) covered by each class;
+images whose detections could not be requested get `None`. When saved to a
+file, the column is written as JSON text.
+
 #### Availability (survey of September 2026)
 
 The feature is **not discontinued**: Mapillary still segments new uploads, and
@@ -132,6 +151,8 @@ The examples notebook is automatically updated via GitHub Actions to ensure fres
 - `get_image_detections(image_id, ...)` - Fetch the detections (segmented regions) of an image
 - `decode_detection_geometry(geometry, width, height)` - Decode a detection's base64 vector tile into a polygon
 - `detections_to_gdf(detections, width, height)` - Detections as a GeoDataFrame of image-space polygons
+- `add_detections_summary(gdf, ...)` - Add a `detections_summary` column (presence, number of classes, % of the image per class) to an images GeoDataFrame
+- `detections_summary(detections)` - The summary dict of one image's detections, without building geometries
 - `detections_to_mask(detections, width, height)` - Rasterize detections into a label mask
 - `colorize_mask(mask, class_index)` - RGB visualization of a label mask
 - `download_segmentation_masks_from_gdf(gdf, folder, ...)` - Download masks for all images of a GeoDataFrame

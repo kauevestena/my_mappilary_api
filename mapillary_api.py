@@ -464,7 +464,13 @@ def download_mapillary_image(url, outfilepath, cooldown=1):
         raise  # Re-raise the exception so calling code can handle it
 
 
-def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
+def mapillary_data_to_gdf(
+    data,
+    outpath=None,
+    filtering_polygon=None,
+    detections_summary=False,
+    token=MAPPILARY_TOKEN,
+):
     """
     Convert Mapillary API response data to a GeoDataFrame.
 
@@ -472,6 +478,11 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
         data (dict): Mapillary API response containing image metadata
         outpath (str, optional): Path to save the GeoDataFrame
         filtering_polygon (optional): Polygon to filter results spatially
+        detections_summary (bool, optional): Add a 'detections_summary'
+            column (see add_detections_summary()). Requests the detections of
+            every image. Default is False.
+        token (str, optional): The Mapillary API token, used when
+            detections_summary is True.
 
     Returns:
         GeoDataFrame: Processed image data with geometry
@@ -497,11 +508,14 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
             selected_columns_to_str(as_gdf)
 
             if filtering_polygon:
-                as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)]
+                as_gdf = as_gdf[as_gdf.intersects(filtering_polygon)].copy()
+
+            if detections_summary:
+                add_detections_summary(as_gdf, token=token)
 
             if outpath:
                 try:
-                    as_gdf.to_file(outpath)
+                    save_gdf(as_gdf, outpath)
                 except Exception as e:
                     print(f"⚠️  Warning: Could not save to {outpath}: {e}")
 
@@ -513,7 +527,9 @@ def mapillary_data_to_gdf(data, outpath=None, filtering_polygon=None):
         return gpd.GeoDataFrame()
 
 
-def tiled_mapillary_data_to_gdf(input_polygon, token, zoom=ZOOM_LEVEL, outpath=None):
+def tiled_mapillary_data_to_gdf(
+    input_polygon, token, zoom=ZOOM_LEVEL, outpath=None, detections_summary=False
+):
 
     # get the bbox of the input polygon:
     minLon, minLat, maxLon, maxLat = input_polygon.bounds
@@ -544,8 +560,11 @@ def tiled_mapillary_data_to_gdf(input_polygon, token, zoom=ZOOM_LEVEL, outpath=N
     # concatenate the GeoDataFrames:
     as_gdf = pd.concat(gdfs_list)
 
+    if detections_summary:
+        add_detections_summary(as_gdf, token=token)
+
     if outpath:
-        as_gdf.to_file(outpath)
+        save_gdf(as_gdf, outpath)
 
     return as_gdf
 
@@ -860,6 +879,24 @@ def get_image_size(image_id, token=MAPPILARY_TOKEN, timeout=60):
     return int(as_dict["width"]), int(as_dict["height"])
 
 
+def _decode_detection_tile(geometry, y_coord_down=True):
+    """
+    Decode the base64-encoded vector tile of a detection into the plain
+    {layer: {"extent": ..., "features": [...]}} structure of mapbox_vector_tile,
+    where feature geometries are GeoJSON-like coordinate lists.
+    """
+    try:
+        data = base64.b64decode(geometry)
+        # tolerate gzip-compressed tiles
+        if data[:2] == b"\x1f\x8b":
+            data = zlib.decompress(data, 16 + zlib.MAX_WBITS)
+        return mapbox_vector_tile.decode(
+            data, default_options={"y_coord_down": y_coord_down}
+        )
+    except Exception as e:
+        raise ValueError(f"Cannot decode detection geometry: {e}")
+
+
 def decode_detection_geometry(geometry, width=1, height=1, y_coord_down=True):
     """
     Decode the base64-encoded vector tile geometry of a Mapillary detection.
@@ -880,16 +917,7 @@ def decode_detection_geometry(geometry, width=1, height=1, y_coord_down=True):
     Raises:
         ValueError: If the geometry cannot be decoded
     """
-    try:
-        data = base64.b64decode(geometry)
-        # tolerate gzip-compressed tiles
-        if data[:2] == b"\x1f\x8b":
-            data = zlib.decompress(data, 16 + zlib.MAX_WBITS)
-        tile = mapbox_vector_tile.decode(
-            data, default_options={"y_coord_down": y_coord_down}
-        )
-    except Exception as e:
-        raise ValueError(f"Cannot decode detection geometry: {e}")
+    tile = _decode_detection_tile(geometry, y_coord_down)
 
     parts = []
     for layer in tile.values():
@@ -912,6 +940,155 @@ def decode_detection_geometry(geometry, width=1, height=1, y_coord_down=True):
     if len(parts) == 1:
         return parts[0]
     return gpd.GeoSeries(parts).union_all()
+
+
+def _ring_area(ring):
+    """Area of a ring given as a list of [x, y] (shoelace formula)."""
+    coords = np.asarray(ring, dtype=float)
+    if len(coords) < 3:
+        return 0.0
+    x, y = coords[:, 0], coords[:, 1]
+    return abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1))) / 2
+
+
+def _encoded_geometry_fraction(geometry):
+    """
+    Fraction of the image covered by an encoded detection geometry, computed
+    directly from the decoded coordinate lists (no geometry objects).
+    """
+    fraction = 0.0
+    for layer in _decode_detection_tile(geometry).values():
+        extent = layer.get("extent", 4096)
+        for feature in layer.get("features", []):
+            geom = feature["geometry"]
+            if geom["type"] == "Polygon":
+                polygons = [geom["coordinates"]]
+            elif geom["type"] == "MultiPolygon":
+                polygons = geom["coordinates"]
+            else:
+                continue
+            for rings in polygons:
+                if not rings:
+                    continue
+                area = _ring_area(rings[0]) - sum(_ring_area(r) for r in rings[1:])
+                fraction += max(area, 0.0) / extent**2
+    return fraction
+
+
+def detections_summary(detections):
+    """
+    Summarize the detections of an image without building any geometry.
+
+    Parameters:
+        detections (list): Detections from get_image_detections() (the
+            'value' and 'geometry' fields are used).
+
+    Returns:
+        dict: {
+            "present": bool, whether the image has detections,
+            "number_available_classes": int, number of distinct classes,
+            "class_percents": {class_value: percent of the image area},
+                sorted from the largest to the smallest class,
+        }
+        The percentages are areas of Mapillary's polygons; regions of a
+        semantic segmentation don't overlap, so they sum to at most ~100 and
+        the rest of the image is unlabeled.
+    """
+    percents = {}
+    for detection in detections:
+        value = detection.get("value")
+        if not detection.get("geometry"):
+            continue
+        try:
+            fraction = _encoded_geometry_fraction(detection["geometry"])
+        except ValueError as e:
+            print(f"⚠️  Warning: Skipping detection {detection.get('id')}: {e}")
+            continue
+        percents[value] = percents.get(value, 0.0) + 100 * fraction
+
+    return {
+        "present": len(detections) > 0,
+        "number_available_classes": len({d.get("value") for d in detections}),
+        "class_percents": {
+            value: round(float(percent), 4)
+            for value, percent in sorted(percents.items(), key=lambda item: item[1], reverse=True)
+        },
+    }
+
+
+def add_detections_summary(
+    gdf, token=MAPPILARY_TOKEN, id_field="id", column="detections_summary", cooldown=0
+):
+    """
+    Add a column with the detections summary (see detections_summary()) of
+    each image of a GeoDataFrame, e.g. one from mapillary_data_to_gdf().
+
+    Only the detection classes and encoded geometries are requested, and the
+    geometries are never turned into geometry objects.
+
+    Parameters:
+        gdf (GeoDataFrame): The images, one row per image.
+        token (str): The Mapillary API token.
+        id_field (str, optional): Field with the image ID. Default is 'id'.
+        column (str, optional): Name of the new column. Default is
+            'detections_summary'.
+        cooldown (float, optional): Seconds to wait between images.
+
+    Returns:
+        GeoDataFrame: The same GeoDataFrame, with the new column. Images whose
+            detections could not be requested get None.
+    """
+    if id_field not in gdf.columns:
+        raise ValueError(f"ID field '{id_field}' not found in GeoDataFrame columns")
+
+    summaries = []
+    errors = []
+    for image_id in tqdm(gdf[id_field], total=len(gdf), desc="Summarizing detections"):
+        try:
+            detections = get_image_detections(
+                image_id, token=token, fields=["value", "geometry"]
+            )
+            summaries.append(detections_summary(detections))
+        except Exception as e:
+            summaries.append(None)
+            errors.append(
+                f"Failed to get detections for image ID {image_id}: {redact_token(e, token)}"
+            )
+        if cooldown:
+            sleep(cooldown)
+
+    # a plain object array, so that duplicate index labels (e.g. after
+    # pd.concat) don't get in the way
+    values = np.empty(len(summaries), dtype=object)
+    values[:] = summaries
+    gdf[column] = values
+
+    with_detections = sum(1 for s in summaries if s and s["present"])
+    print(
+        f"✅ Detections summarized: {with_detections} with detections, {len(summaries) - with_detections - len(errors)} without, {len(errors)} failed"
+    )
+    if errors:
+        print(f"❌ Errors encountered: {len(errors)}")
+        for error in errors[:5]:
+            print(f"   - {error}")
+        if len(errors) > 5:
+            print(f"   ... and {len(errors) - 5} more errors")
+
+    return gdf
+
+
+def save_gdf(gdf, outpath):
+    """
+    Save a GeoDataFrame, serializing dict columns (e.g. detections_summary)
+    as JSON text, since vector file formats cannot store them.
+    """
+    to_save = gdf.copy()
+    for column in to_save.columns:
+        if column != to_save.geometry.name and any(isinstance(v, dict) for v in to_save[column]):
+            to_save[column] = to_save[column].apply(
+                lambda v: json.dumps(v, ensure_ascii=False) if v is not None else None
+            )
+    to_save.to_file(outpath)
 
 
 def detections_to_gdf(detections, width=1, height=1, y_coord_down=True):
