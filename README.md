@@ -8,6 +8,7 @@ A lightweight Python library for accessing the Mapillary API speaking GeoDatafra
 - 📍 Query by bounding box or place name
 - 🧩 Tiled querying for large areas
 - 📊 Export data to GeoJSON and other formats
+- 🎨 Semantic segmentation masks computed by Mapillary (decoded from the API's detections)
 - 🌍 Interactive map visualization with Folium
 - 🤖 Automated examples with GitHub Actions
 
@@ -51,6 +52,34 @@ gdf = mapillary_data_to_gdf(metadata)
 gdf.to_file("mapillary_data.geojson")
 ```
 
+### Semantic Segmentation Masks
+
+Mapillary runs semantic segmentation on its servers and serves it per image as
+*detections*: one entry per region, with the class in `value` (e.g.
+`construction--flat--road`, `nature--sky`, `object--vehicle--car`) and the
+region polygon in `geometry`, encoded as a base64 Mapbox Vector Tile. The
+library decodes them into polygons or label masks:
+
+```python
+detections = get_image_detections(image_id)
+
+# Polygons in pixel coordinates (origin at the top-left corner)
+detections_gdf = detections_to_gdf(detections, width=2048, height=1536)
+
+# Label mask (uint16, 0 = unlabeled) and its {class: label} mapping
+mask, class_index = detections_to_mask(detections, 2048, 1536)
+rgb = colorize_mask(mask, class_index)
+
+# Bulk download for all images of a GeoDataFrame (16-bit PNG masks + class legends)
+download_segmentation_masks_from_gdf(gdf, "masks", scale_factor=0.25)
+```
+
+Not every image has detections, and availability depends on where and when the
+images were captured. See the
+[availability survey](survey/SEGMENTATION_AVAILABILITY.md), produced by
+[`scripts/segmentation_survey.py`](scripts/segmentation_survey.py) through the
+*Segmentation Availability Survey* GitHub Action.
+
 ### Interactive Examples
 
 Check out the **[examples.ipynb](examples.ipynb)** notebook for comprehensive examples including:
@@ -71,6 +100,15 @@ The examples notebook is automatically updated via GitHub Actions to ensure fres
 - `get_territory_polygon(place_name, ...)` - Get polygon for a named place
 - `tiled_mapillary_data_to_gdf(polygon, ...)` - Query large areas using tiles
 - `download_all_pictures_from_gdf(gdf, folder, ...)` - Download actual images
+
+### Semantic Segmentation Functions
+
+- `get_image_detections(image_id, ...)` - Fetch the detections (segmented regions) of an image
+- `decode_detection_geometry(geometry, width, height)` - Decode a detection's base64 vector tile into a polygon
+- `detections_to_gdf(detections, width, height)` - Detections as a GeoDataFrame of image-space polygons
+- `detections_to_mask(detections, width, height)` - Rasterize detections into a label mask
+- `colorize_mask(mask, class_index)` - RGB visualization of a label mask
+- `download_segmentation_masks_from_gdf(gdf, folder, ...)` - Download masks for all images of a GeoDataFrame
 
 ### Utility Functions
 
@@ -104,6 +142,8 @@ Core dependencies (see [requirements.txt](requirements.txt)):
 - `wget` - File downloads
 - `mercantile` - Map tile utilities
 - `tqdm` - Progress bars
+- `pillow`, `numpy` - Image handling and masks
+- `mapbox-vector-tile` - Decoding of the detection geometries
 
 Optional dependencies:
 - `folium` - Interactive map visualizations (not in requirements.txt)

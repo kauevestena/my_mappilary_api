@@ -169,3 +169,6 @@ sample_images
 
 # Generated map files from examples
 *.html
+
+# Raw outputs of scripts/segmentation_survey.py (uploaded as workflow artifacts)
+survey_raw/
